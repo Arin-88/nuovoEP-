@@ -80,7 +80,8 @@ if MPD_MODE == "legacy":
     StreamWishExtractor,
     SupervideoExtractor,
     UqloadExtractor,
-) = None, None, None, None, None
+    DroploadExtractor,
+) = None, None, None, None, None, None
 (
     VidmolyExtractor,
     VidozaExtractor,
@@ -256,6 +257,13 @@ try:
     logger.info("✅ UqloadExtractor module loaded.")
 except ImportError:
     logger.warning("⚠️ UqloadExtractor module not found.")
+
+try:
+    from extractors.dropload import DroploadExtractor
+
+    logger.info("DroploadExtractor module loaded.")
+except ImportError:
+    logger.warning("DroploadExtractor module not found.")
 
 try:
     from extractors.vidmoly import VidmolyExtractor
@@ -607,6 +615,12 @@ class HLSProxy:
                             request_headers, proxies=GLOBAL_PROXIES
                         )
                     return self.extractors[key]
+                elif host == "dropload":
+                    if key not in self.extractors:
+                        self.extractors[key] = DroploadExtractor(
+                            request_headers, proxies=GLOBAL_PROXIES
+                        )
+                    return self.extractors[key]
                 elif host == "uqload":
                     if key not in self.extractors:
                         self.extractors[key] = UqloadExtractor(
@@ -858,6 +872,17 @@ class HLSProxy:
                 proxy_list = [proxy] if proxy else []
                 if key not in self.extractors:
                     self.extractors[key] = SupervideoExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
+            elif "dropload" in url:
+                key = "dropload"
+                proxy = get_proxy_for_url(
+                    "dropload", TRANSPORT_ROUTES, GLOBAL_PROXIES
+                )
+                proxy_list = [proxy] if proxy else []
+                if key not in self.extractors:
+                    self.extractors[key] = DroploadExtractor(
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
@@ -1450,6 +1475,7 @@ class HLSProxy:
                         "okru",
                         "streamwish",
                         "supervideo",
+                        "dropload",
                         "uqload",
                         "vidmoly",
                         "vidoza",
