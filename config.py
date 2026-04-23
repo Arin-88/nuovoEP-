@@ -175,14 +175,16 @@ def get_solver_proxy_url(proxy_url: str | None) -> str | None:
 
 def get_ssl_setting_for_url(url: str, transport_routes: list) -> bool:
     """Determina se SSL deve essere disabilitato per un URL basato su TRANSPORT_ROUTES."""
+    normalized_url = (url or "").lower()
+
+    if "disable_ssl=1" in normalized_url:
+        return True
+
     if not url or not transport_routes:
-        normalized_url = (url or "").lower()
         return any(
             domain in normalized_url
             for domain in ("vavoo.to", "vavoo.tv", "lokke.app", "mediahubmx")
         )
-
-    normalized_url = url.lower()
 
     if any(
         domain in normalized_url
