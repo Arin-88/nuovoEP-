@@ -127,6 +127,8 @@ def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, by
     if bypass_warp is None:
         bypass_warp = BYPASS_WARP_CONTEXT.get()
     if not url:
+        if bypass_warp:
+            return None
         proxy = random.choice(global_proxies) if global_proxies else None
         return proxy if is_proxy_alive(proxy) else None
 
@@ -146,6 +148,11 @@ def get_proxy_for_url(url: str, transport_routes: list, global_proxies: list, by
         return WARP_PROXY_URL
 
     # Fallback to Global Proxies
+    # Se bypass_warp è True, preferiamo la connessione DIRETTA (Real IP) per coerenza
+    # invece di pescare un proxy a caso dalla lista globale, che causerebbe rotazione IP.
+    if bypass_warp:
+        return None
+
     # Use sticky proxy if already selected for this request context
     proxy = SELECTED_PROXY_CONTEXT.get()
     if proxy:
