@@ -59,6 +59,7 @@ class DLStreamsExtractor:
         self._last_session_refresh: dict[str, float] = {}
         self._refresh_tasks: dict[str, asyncio.Task] = {}
         self._dynamic_refresh_interval: dict[str, float] = {}
+        self._inflight_extract_tasks: dict[str, asyncio.Task] = {}
         # Manifest micro-cache to handle rapid requests
         self._manifest_cache: dict[str, tuple[str, float]] = {}
         self._watchdog_task = asyncio.create_task(self._browser_watchdog())
@@ -525,9 +526,25 @@ class DLStreamsExtractor:
     async def extract(self, url: str, **kwargs) -> Dict[str, Any]:
         """Extracts the M3U8 URL and headers bypassing the public watch page."""
         self._update_shared_activity()
+        channel_id = self._extract_channel_id(url)
+        channel_key = f"premium{channel_id}"
+
+        existing_task = self._inflight_extract_tasks.get(channel_key)
+        if existing_task and not existing_task.done():
+            logger.debug("DLStreams: waiting for in-flight extraction of %s", channel_key)
+            return await existing_task
+
+        task = asyncio.create_task(self._extract_impl(url, channel_id=channel_id, **kwargs))
+        self._inflight_extract_tasks[channel_key] = task
         try:
-            # Extract ID from URL or use as is if numeric
-            channel_id = self._extract_channel_id(url)
+            return await task
+        finally:
+            current_task = self._inflight_extract_tasks.get(channel_key)
+            if current_task is task:
+                self._inflight_extract_tasks.pop(channel_key, None)
+
+    async def _extract_impl(self, url: str, channel_id: str, **kwargs) -> Dict[str, Any]:
+        try:
 
             # Respect bypass_warp or warp from kwargs if provided
             # Force direct routing for DLStreams regardless of query params or caller defaults.
