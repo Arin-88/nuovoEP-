@@ -590,8 +590,7 @@ class HLSProxy:
         # Patterns for domains that usually block Cloudflare/WARP
         # Cinemacity, VixSrc, etc.
         bypass_patterns = [
-            "cccdn.net", "cinemacity.cc", "strem.fun", "torrentio.strem.fun",
-            "vavoo.to", "vavoo.tv", "lokke.app"
+            "cccdn.net", "cinemacity.cc", "strem.fun", "torrentio.strem.fun"
         ]
         
         try:
@@ -1310,9 +1309,7 @@ class HLSProxy:
             return web.Response(status=401, text="Unauthorized: Invalid API Password")
 
         target_url = request.query.get("url") or request.query.get("d")
-        bypass_warp = (request.query.get("warp", "").lower() == "off") or (
-            target_url and ("vavoo.to" in target_url or "vavoo.tv" in target_url)
-        )
+        bypass_warp = (request.query.get("warp", "").lower() == "off")
         token = BYPASS_WARP_CONTEXT.set(bypass_warp)
         proxy_token = SELECTED_PROXY_CONTEXT.set(None)
         
@@ -1452,6 +1449,7 @@ class HLSProxy:
                     "cinemacity.cc" in (original_channel_url or "").lower()
                     or request.query.get("host", "").lower() in {"city", "cinemacity"}
                 )
+                disable_ssl = request.query.get("disable_ssl") == "1" or force_disable_ssl
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
                     manifest_content=captured_manifest,
                     base_url=stream_url,
@@ -1463,6 +1461,7 @@ class HLSProxy:
                     no_bypass=no_bypass,
                     shorten_url_func=self.shorten_hls_url if use_short_hls_urls else None,
                     bypass_warp=bypass_warp,
+                    disable_ssl=disable_ssl,
                 )
                 return web.Response(
                     text=rewritten_manifest,
@@ -2308,7 +2307,8 @@ class HLSProxy:
                     f"🔐 Auth key headers: Authorization={'***' if headers.get('Authorization') else 'missing'}, X-Channel-Key={headers.get('X-Channel-Key', 'missing')}, X-User-Agent={headers.get('X-User-Agent', 'missing')}"
                 )
 
-            async with session.get(key_url, headers=headers) as resp:
+            disable_ssl = get_ssl_setting_for_url(key_url, TRANSPORT_ROUTES)
+            async with session.get(key_url, headers=headers, ssl=not disable_ssl) as resp:
                 if resp.status == 200 or resp.status == 206:
                     key_data = await resp.read()
                     logger.debug(
@@ -2433,9 +2433,10 @@ class HLSProxy:
             session, _ = await self._get_proxy_session(
                 segment_url, bypass_warp=bypass_warp
             )
+            disable_ssl = get_ssl_setting_for_url(segment_url, TRANSPORT_ROUTES)
             # ✅ Use yarl.URL with encoded=True to prevent double-encoding of commas
             final_segment_url = yarl.URL(segment_url, encoded=True)
-            async with session.get(final_segment_url, headers=headers) as resp:
+            async with session.get(final_segment_url, headers=headers, ssl=not disable_ssl) as resp:
                 response_headers = {}
 
                 for header in [
@@ -2866,6 +2867,7 @@ class HLSProxy:
                         or "cccdn.net" in str(resp.url).lower()
                     )
                     
+                    disable_ssl = request.query.get("disable_ssl") == "1" or get_ssl_setting_for_url(str(resp.url), TRANSPORT_ROUTES)
                     rewritten = await ManifestRewriter.rewrite_manifest_urls(
                         manifest_content=manifest_content,
                         base_url=str(resp.url),
@@ -2876,7 +2878,8 @@ class HLSProxy:
                         get_extractor_func=self.get_extractor,
                         no_bypass=request.query.get("no_bypass") == "1",
                         shorten_url_func=self.shorten_hls_url if use_short_hls_urls else None,
-                        bypass_warp=bypass_warp
+                        bypass_warp=bypass_warp,
+                        disable_ssl=disable_ssl,
                     )
                     return web.Response(text=rewritten, headers={
                         "Content-Type": "application/vnd.apple.mpegurl",
