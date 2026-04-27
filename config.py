@@ -299,7 +299,7 @@ MAX_RECORDING_DURATION = int(os.environ.get("MAX_RECORDING_DURATION", 28800))
 RECORDINGS_RETENTION_DAYS = int(os.environ.get("RECORDINGS_RETENTION_DAYS", 7))
 
 # --- Version/Mode Configuration ---
-APP_VERSION = "2.6.11"
+APP_VERSION = "2.6.12"
 
 _has_solvers = os.path.exists("flaresolverr")
 VERSION_MODE = "Full" if _has_solvers else "Light"
@@ -326,7 +326,6 @@ if "MPD_MODE" in os.environ:
 # --- FlareSolverr Configuration ---
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191").rstrip("/")
 FLARESOLVERR_TIMEOUT = int(os.environ.get("FLARESOLVERR_TIMEOUT", 30))
-FLARESOLVERR_WARM_SESSIONS = os.environ.get("FLARESOLVERR_WARM_SESSIONS", "false").lower() in ("true", "1", "yes")
 
 
 def check_password(request):
