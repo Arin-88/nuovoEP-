@@ -199,12 +199,17 @@ class MaxstreamExtractor:
                         
                         # Check for Cloudflare challenge in successful response
                         if any(marker in text.lower() for marker in ["cf-challenge", "ray id", "checking your browser"]):
-                            logger.warning(f"Cloudflare detected on {url} (Proxy: {proxy}), trying FlareSolverr fallback...")
                             # Fallback to the global smart_request utility
                             if proxy: await session.close()
                             fs_cmd = f"request.{method.lower()}"
-                            result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=self.proxies)
-                            return result.get("html", "") if isinstance(result, dict) else result
+                            # Pass the current proxy to FlareSolverr if it exists, otherwise use self.proxies
+                            fs_proxies = [proxy] if proxy else self.proxies
+                            result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=fs_proxies)
+                            html = result.get("html", "") if isinstance(result, dict) else result
+                            if html:
+                                return html
+                            logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
+                            continue
 
                         if proxy: await session.close()
                         return text
@@ -213,8 +218,14 @@ class MaxstreamExtractor:
                         logger.warning(f"HTTP {response.status} on {url}, checking with FlareSolverr...")
                         if proxy: await session.close()
                         fs_cmd = f"request.{method.lower()}"
-                        result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=self.proxies)
-                        return result.get("html", "") if isinstance(result, dict) else result
+                        # Pass the current proxy to FlareSolverr if it exists, otherwise use self.proxies
+                        fs_proxies = [proxy] if proxy else self.proxies
+                        result = await smart_request(fs_cmd, url, headers=kwargs.get("headers"), post_data=kwargs.get("data"), proxies=fs_proxies)
+                        html = result.get("html", "") if isinstance(result, dict) else result
+                        if html:
+                            return html
+                        logger.warning(f"FlareSolverr failed for {url} on this path, trying next path...")
+                        continue
                     else:
                         logger.warning(f"Request to {url} failed (Status {response.status}) [Proxy: {proxy}, StaticIP: {use_ip}]")
             except Exception as e:
