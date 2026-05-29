@@ -3,10 +3,9 @@ VidXgo extractor.
 
 Decodes the obfuscated player at v.vidxgo.co / vidxgo.* and returns the master
 HLS playlist. CDN signed URLs on the .ts segments have a ~5 min TTL. Always
-re-fetches the embed page on each extract() call to get fresh tokens. Transforms
-the VOD manifest into an "EVENT" / live one by removing `#EXT-X-ENDLIST`, so the
-player keeps re-fetching the manifest and EP gets a chance to serve a
-freshly-extracted segment URL list before the CDN tokens expire.
+re-fetches the embed page on each extract() call to get fresh tokens. Token
+refresh happens transparently at the segment level via
+`_refresh_segment_token()` when a 403 is returned.
 """
 
 import asyncio
@@ -175,34 +174,6 @@ class VidXgoExtractor:
             raise ExtractorError("VidXgo: source is marked corrupt or not available")
         raise ExtractorError("VidXgo: could not locate currentSrc m3u8 in any decoded script")
 
-    # ------------------------------------------------------------------ manifest transform
-
-    @staticmethod
-    def _make_live(manifest_text: str) -> str:
-        """
-        Turn a VOD playlist into an EVENT/live one so the player re-fetches
-        the manifest periodically. This gives EP the chance to call
-        extract() again and serve fresh segment URLs.
-        """
-        if not manifest_text:
-            return manifest_text
-        # Drop the end-of-stream marker so the player keeps polling.
-        out_lines = []
-        for line in manifest_text.splitlines():
-            s = line.strip()
-            if s == "#EXT-X-ENDLIST":
-                continue
-            if s.startswith("#EXT-X-PLAYLIST-TYPE"):
-                out_lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
-                continue
-            out_lines.append(line)
-        if not any(l.startswith("#EXT-X-PLAYLIST-TYPE") for l in out_lines):
-            for i, l in enumerate(out_lines):
-                if l.strip() == "#EXTM3U":
-                    out_lines.insert(i + 1, "#EXT-X-PLAYLIST-TYPE:EVENT")
-                    break
-        return "\n".join(out_lines)
-
     # ------------------------------------------------------------------ public API
 
     async def extract(self, url: str, **kwargs) -> dict:
@@ -244,8 +215,6 @@ class VidXgoExtractor:
         master_text = await self._fetch(m3u8_url, playback_headers)
         if "#EXTM3U" not in master_text:
             raise ExtractorError("VidXgo: extracted URL did not return a valid HLS manifest")
-        if "#EXTINF" in master_text:
-            master_text = self._make_live(master_text)
 
         from urllib.parse import urljoin
         captured_map: dict[str, str] = {}
@@ -279,8 +248,6 @@ class VidXgoExtractor:
             for v_url, v_text in results:
                 if not v_text:
                     continue
-                if "#EXTINF" in v_text:
-                    v_text = self._make_live(v_text)
                 captured_map[v_url] = v_text
 
         captured_map[m3u8_url] = master_text
