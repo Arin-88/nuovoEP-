@@ -5,7 +5,7 @@ import time
 import urllib.parse
 import aiohttp
 import config_store
-from config import PROXY_SOURCE_LIST, find_first_alive_async
+from config import PROXY_SOURCE_LIST, find_first_alive_async, is_proxy_alive
 import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
@@ -1139,12 +1139,14 @@ class HLSProxyStreamingMixin:
                 is_proxy_err = any(x in err_lower for x in ("invalid reply", "request rejected", "connection refused", "connection reset", "proxy connection timed out", "can't connect to server", "couldn't connect", "connect call failed", "0x9", "0x7", "socks5"))
                 if is_proxy_err:
                     request._ps_retried = True
-                    logger.warning("Proxy %s failed for %s, checking dead policy and triggering re-extraction", forced_proxy, stream_url)
                     self._mark_proxy_dead_if_allowed(
                         forced_proxy,
                         extractor_key=request.query.get("extractor_key"),
                     )
-                    raise ProxyDeadRetryError("PROXY_DEAD_RETRY_EXTRACTION")
+                    if not is_proxy_alive(forced_proxy):
+                        logger.warning("Proxy %s failed for %s, triggering re-extraction", forced_proxy, stream_url)
+                        raise ProxyDeadRetryError("PROXY_DEAD_RETRY_EXTRACTION")
+                    logger.info("Proxy %s had transient error for %s, skipping re-extraction", forced_proxy, stream_url)
 
             logger.error(
                 "❌ Generic error in stream proxy [%s]: %r",
