@@ -133,83 +133,91 @@ class HLSProxyCoreMixin:
 
     async def reconnect_warp(self) -> dict:
         """Reconnect WARP to get a new IP. Tries warp-cli first, then wireproxy kill+restart."""
-        result = {"status": "ok", "message": ""}
+        if not hasattr(self, "_warp_reconnect_lock"):
+            self._warp_reconnect_lock = asyncio.Lock()
 
-        if await _warp_cli_connect():
-            result["message"] = "WARP reconnected via warp-cli"
-            return result
+        if self._warp_reconnect_lock.locked():
+            logger.warning("WARP reconnect already in progress. Skipping redundant request.")
+            return {"status": "ok", "message": "Reconnect already in progress"}
 
-        # Fallback: wireproxy mode — kill, re-register, restart
-        warp_dir = os.environ.get("WARP_DIR", "/tmp/easyproxy-warp")
-        _kill_wireproxy()
-        await asyncio.sleep(1)
+        async with self._warp_reconnect_lock:
+            result = {"status": "ok", "message": ""}
 
-        try:
-            # Remove old registration to force new IP
-            acct_file = os.path.join(warp_dir, "wgcf-account.toml")
-            if os.path.exists(acct_file):
-                os.remove(acct_file)
+            if await _warp_cli_connect():
+                result["message"] = "WARP reconnected via warp-cli"
+                return result
 
-            # Re-register and start wireproxy
-            proc = await asyncio.create_subprocess_exec(
-                "wgcf", "register", "--accept-tos",
-                cwd=warp_dir,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            # Fallback: wireproxy mode — kill, re-register, restart
+            warp_dir = os.environ.get("WARP_DIR", "/tmp/easyproxy-warp")
+            _kill_wireproxy()
+            await asyncio.sleep(1)
 
-            license_key = _shared.WARP_LICENSE_KEY or config_store.get("warp_license_key", "")
-            if license_key:
+            try:
+                # Remove old registration to force new IP
+                acct_file = os.path.join(warp_dir, "wgcf-account.toml")
+                if os.path.exists(acct_file):
+                    os.remove(acct_file)
+
+                # Re-register and start wireproxy
                 proc = await asyncio.create_subprocess_exec(
-                    "wgcf", "update", "--license-key", license_key,
+                    "wgcf", "register", "--accept-tos",
                     cwd=warp_dir,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                 )
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                await asyncio.wait_for(proc.wait(), timeout=15)
 
-            # Generate wireproxy config
-            profile = os.path.join(warp_dir, "wgcf-profile.conf")
-            if os.path.exists(profile):
-                os.remove(profile)
-            wp_conf = os.path.join(warp_dir, "wireproxy.conf")
-            if os.path.exists(wp_conf):
-                os.remove(wp_conf)
+                license_key = _shared.WARP_LICENSE_KEY or config_store.get("warp_license_key", "")
+                if license_key:
+                    proc = await asyncio.create_subprocess_exec(
+                        "wgcf", "update", "--license-key", license_key,
+                        cwd=warp_dir,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(proc.wait(), timeout=10)
 
-            proc = await asyncio.create_subprocess_exec(
-                "wgcf", "generate",
-                cwd=warp_dir,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+                # Generate wireproxy config
+                profile = os.path.join(warp_dir, "wgcf-profile.conf")
+                if os.path.exists(profile):
+                    os.remove(profile)
+                wp_conf = os.path.join(warp_dir, "wireproxy.conf")
+                if os.path.exists(wp_conf):
+                    os.remove(wp_conf)
 
-            # Build wireproxy.conf with SOCKS5 section
-            import shutil
-            shutil.copy(profile, wp_conf)
-            with open(wp_conf, "a") as f:
-                f.write("\n[Socks5]\nBindAddress = 127.0.0.1:1080\n")
+                proc = await asyncio.create_subprocess_exec(
+                    "wgcf", "generate",
+                    cwd=warp_dir,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=15)
 
-            # Start wireproxy
-            proc = await asyncio.create_subprocess_exec(
-                "wireproxy", "-c", wp_conf,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            # Verify SOCKS5 is listening
-            import socket
-            for _ in range(10):
-                try:
-                    s = socket.create_connection(("127.0.0.1", 1080), timeout=2)
-                    s.close()
-                    result["message"] = "WARP reconnected via wireproxy (new IP)"
-                    return result
-                except (OSError, ConnectionRefusedError):
-                    await asyncio.sleep(1)
-            result["status"] = "error"
-            result["message"] = "wireproxy started but SOCKS5 not detected on 1080"
-        except Exception as e:
-            result["status"] = "error"
-            result["message"] = f"WARP reconnect failed: {e}"
+                # Build wireproxy.conf with SOCKS5 section
+                import shutil
+                shutil.copy(profile, wp_conf)
+                with open(wp_conf, "a") as f:
+                    f.write("\n[Socks5]\nBindAddress = 127.0.0.1:1080\n")
 
-        return result
+                # Start wireproxy
+                proc = await asyncio.create_subprocess_exec(
+                    "wireproxy", "-c", wp_conf,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                # Verify SOCKS5 is listening
+                import socket
+                for _ in range(10):
+                    try:
+                        s = socket.create_connection(("127.0.0.1", 1080), timeout=2)
+                        s.close()
+                        result["message"] = "WARP reconnected via wireproxy (new IP)"
+                        return result
+                    except (OSError, ConnectionRefusedError):
+                        await asyncio.sleep(1)
+                result["status"] = "error"
+                result["message"] = "wireproxy started but SOCKS5 not detected on 1080"
+            except Exception as e:
+                result["status"] = "error"
+                result["message"] = f"WARP reconnect failed: {e}"
+
+            return result
 
     async def _stop_warp_proxy(self):
         for cmd in [["warp-cli", "--accept-tos", "disconnect"]]:
