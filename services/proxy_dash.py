@@ -359,15 +359,15 @@ class HLSProxyDashMixin:
                             finally:
                                 _ek = self._extractor_key_for_instance(extractor) if extractor else None
                                 if _ek and _ek in self.extractors:
-                                    _ext = self.extractors.pop(_ek, None)
+                                    self.extractors.pop(_ek, None)
                                     self._extractor_atimes.pop(_ek, None)
                                     for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek]:
                                         self._extractor_stream_atimes.pop(_sr, None)
-                                    if _ext and hasattr(_ext, "close"):
-                                        try:
-                                            await _ext.close()
-                                        except Exception:
-                                            pass
+                                if extractor and hasattr(extractor, "close"):
+                                    try:
+                                        await extractor.close()
+                                    except Exception:
+                                        pass
                         # --- FINE LOGICA ---
                         return web.Response(
                             text=f"Key fetch failed: {resp.status}", status=resp.status

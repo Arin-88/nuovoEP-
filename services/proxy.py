@@ -60,9 +60,8 @@ class HLSProxy(
         _extractor_stream_atimes_var.set(value)
 
     def __init__(self, ffmpeg_manager=None):
-        self.extractors = {}
-        self._extractor_atimes = {}
-        self._extractor_stream_atimes = {}
+        # Note: self.extractors, self._extractor_atimes, and self._extractor_stream_atimes 
+        # are lazily initialized per asyncio task context to prevent concurrent request race conditions.
         self.ffmpeg_manager = ffmpeg_manager
 
         # Inizializza il playlist_builder se il modulo è disponibile

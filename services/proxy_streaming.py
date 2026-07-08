@@ -1206,15 +1206,15 @@ class HLSProxyStreamingMixin:
             # 🚫 Cache disabilitata: chiudi subito l'estrattore re-estratto.
             _ek = self._extractor_key_for_instance(extractor) if extractor else None
             if _ek and _ek in self.extractors:
-                _ext = self.extractors.pop(_ek, None)
+                self.extractors.pop(_ek, None)
                 self._extractor_atimes.pop(_ek, None)
                 for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek]:
                     self._extractor_stream_atimes.pop(_sr, None)
-                if _ext and hasattr(_ext, "close"):
-                    try:
-                        await _ext.close()
-                    except Exception:
-                        pass
+            if extractor and hasattr(extractor, "close"):
+                try:
+                    await extractor.close()
+                except Exception:
+                    pass
 
         captured_manifests = refreshed.get("captured_manifests") or {}
         master_url = refreshed.get("destination_url")
@@ -1332,14 +1332,13 @@ class HLSProxyStreamingMixin:
                 stdout = b"".join(chunks)
 
                 await proc.wait()
-            except Exception:
+            finally:
                 if proc.returncode is None:
                     try:
                         proc.kill()
                         await proc.wait()
                     except Exception:
                         pass
-                raise
 
             if len(stdout) > 0:
                 if proc.returncode != 0:

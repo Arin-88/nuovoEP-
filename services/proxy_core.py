@@ -81,12 +81,13 @@ class HLSProxyCoreMixin:
         asyncio.create_task(self._warp_keepalive())
 
     async def _cleanup_stale_sessions(self):
-        """Periodic cleanup of stale CDN tokens (extractor cache is disabled —
-        extractors are closed immediately in the finally block)."""
+        """Periodic cleanup of stale CDN tokens and idle proxy sessions to prevent memory accumulation when idle."""
         while True:
             try:
                 await asyncio.sleep(60)
                 now = time.time()
+                
+                # 1. Clean up stale HLS/CDN tokens (>300s)
                 stale_tokens = [
                     k for k, t in getattr(self, '_renewed_cdn_token_atimes', {}).items()
                     if now - t > 300
@@ -95,6 +96,20 @@ class HLSProxyCoreMixin:
                     self._renewed_cdn_tokens.pop(k, None)
                     self._renewed_cdn_token_atimes.pop(k, None)
                     logger.debug("🧹 Cleaned stale CDN token: %s", k[:8])
+                
+                # 2. Clean up idle proxy sessions (>60s)
+                if hasattr(self, "_proxy_sessions") and hasattr(self, "_proxy_session_atimes"):
+                    _warp_url = _shared.WARP_PROXY_URL
+                    stale_proxies = [
+                        p for p, t in list(self._proxy_session_atimes.items())
+                        if now - t > 60 and p != _warp_url
+                    ]
+                    for p in stale_proxies:
+                        p_sess = self._proxy_sessions.pop(p, None)
+                        self._proxy_session_atimes.pop(p, None)
+                        if p_sess and not p_sess.closed:
+                            await p_sess.close()
+                            logger.info(f"[NET] Closed idle proxy session: {p}")
             except Exception as e:
                 logger.error("Cleanup stale sessions error: %s", e)
                 await asyncio.sleep(10)
@@ -533,10 +548,20 @@ class HLSProxyCoreMixin:
                 self._proxy_sessions = {}
                 self._proxy_session_atimes = {}
 
-            for p_url, p_sess in list(self._proxy_sessions.items()):
-                if p_sess.closed:
-                    self._proxy_sessions.pop(p_url, None)
-                    self._proxy_session_atimes.pop(p_url, None)
+            # Evict oldest session if cache gets too large (e.g. >= 10) to prevent memory leak
+            if len(self._proxy_sessions) >= 10 and proxy not in self._proxy_sessions:
+                try:
+                    _warp_url = _shared.WARP_PROXY_URL
+                    candidates = [p for p in self._proxy_sessions if p != _warp_url]
+                    if candidates:
+                        oldest_proxy = min(candidates, key=lambda p: self._proxy_session_atimes.get(p, 0))
+                        oldest_sess = self._proxy_sessions.pop(oldest_proxy, None)
+                        self._proxy_session_atimes.pop(oldest_proxy, None)
+                        if oldest_sess and not oldest_sess.closed:
+                            await oldest_sess.close()
+                            logger.info(f"[NET] Evicted oldest proxy session: {oldest_proxy}")
+                except Exception as e:
+                    logger.warning(f"Failed to evict proxy session: {e}")
 
             if proxy not in self._proxy_sessions or self._proxy_sessions[proxy].closed:
                 logger.info(f"[NET] Creating pooled proxy session: {proxy}")

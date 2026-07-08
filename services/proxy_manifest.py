@@ -624,15 +624,15 @@ class HLSProxyManifestHandlerMixin:
                 finally:
                     _ek2 = self._extractor_key_for_instance(extractor2) if extractor2 else None
                     if _ek2 and _ek2 in self.extractors:
-                        _ext = self.extractors.pop(_ek2, None)
+                        self.extractors.pop(_ek2, None)
                         self._extractor_atimes.pop(_ek2, None)
                         for _sr in [r for r in self._extractor_stream_atimes if r[0] == _ek2]:
                             self._extractor_stream_atimes.pop(_sr, None)
-                        if _ext and hasattr(_ext, "close"):
-                            try:
-                                await _ext.close()
-                            except Exception:
-                                pass
+                    if extractor2 and hasattr(extractor2, "close"):
+                        try:
+                            await extractor2.close()
+                        except Exception:
+                            pass
 
         except Exception as e:
             error_msg = str(e).lower()
@@ -668,12 +668,12 @@ class HLSProxyManifestHandlerMixin:
             STRICT_PROXY_CONTEXT.reset(strict_proxy_token)
             # 🚫 Cache disabilitata: chiudi sempre l'estrattore dopo l'uso.
             if extractor_key and extractor_key in self.extractors:
-                _ext = self.extractors.pop(extractor_key, None)
+                self.extractors.pop(extractor_key, None)
                 self._extractor_atimes.pop(extractor_key, None)
                 for _sr in [r for r in self._extractor_stream_atimes if r[0] == extractor_key]:
                     self._extractor_stream_atimes.pop(_sr, None)
-                if _ext and hasattr(_ext, "close"):
-                    try:
-                        await _ext.close()
-                    except Exception:
-                        pass
+            if extractor and hasattr(extractor, "close"):
+                try:
+                    await extractor.close()
+                except Exception:
+                    pass
