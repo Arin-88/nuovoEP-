@@ -191,12 +191,14 @@ class MP4Decrypter:
         self.track_kid_map = {}  # track_id -> KID (bytes) from tenc box
         self._last_extracted_kid = None  # temp storage during moov processing
 
-    def decrypt_segment(self, combined_segment: bytes) -> bytes:
+    def decrypt_segment(self, combined_segment: bytes, init_length: int = 0) -> bytes:
         """
         Decrypts a combined MP4 segment.
 
         Args:
             combined_segment (bytes): Combined initialization and media segment.
+            init_length (int): Length of the initialization segment. If > 0, all atoms
+                               belonging to the initialization segment are skipped in the output.
 
         Returns:
             bytes: Decrypted segment content.
@@ -213,7 +215,12 @@ class MP4Decrypter:
                 processed_atoms[atom_type] = self._process_atom(atom_type, atom)
 
         result = bytearray()
+        current_offset = 0
         for atom in atoms:
+            is_init_atom = current_offset < init_length
+            current_offset += atom.size
+            if init_length > 0 and is_init_atom:
+                continue
             if atom.atom_type in processed_atoms:
                 processed_atom = processed_atoms[atom.atom_type]
                 result.extend(processed_atom.pack())
@@ -779,7 +786,7 @@ class MP4Decrypter:
         return None
 
 
-def decrypt_segment(init_segment: bytes, segment_content: bytes, key_id: str, key: str) -> bytes:
+def decrypt_segment(init_segment: bytes, segment_content: bytes, key_id: str, key: str, skip_init: bool = False) -> bytes:
     """
     Decrypts a CENC encrypted MP4 segment.
 
@@ -788,6 +795,7 @@ def decrypt_segment(init_segment: bytes, segment_content: bytes, key_id: str, ke
         segment_content (bytes): Encrypted segment content.
         key_id (str): Key ID(s) in hexadecimal format. Supports comma-separated for multi-key: "KID1,KID2"
         key (str): Key(s) in hexadecimal format. Supports comma-separated for multi-key: "KEY1,KEY2"
+        skip_init (bool): If True, all atoms belonging to the initialization segment are excluded from the output.
     
     Returns:
         bytes: Decrypted segment content.
@@ -808,7 +816,8 @@ def decrypt_segment(init_segment: bytes, segment_content: bytes, key_id: str, ke
         key_map[bytes.fromhex(kid)] = bytes.fromhex(k)
     
     decrypter = MP4Decrypter(key_map)
-    decrypted_content = decrypter.decrypt_segment(init_segment + segment_content)
+    init_length = len(init_segment) if skip_init else 0
+    decrypted_content = decrypter.decrypt_segment(init_segment + segment_content, init_length=init_length)
     return decrypted_content
 
 

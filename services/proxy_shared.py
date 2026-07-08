@@ -60,7 +60,7 @@ from services.manifest_rewriter import ManifestRewriter
 # Global registry for domains already bypassed in WARP to avoid redundant os.system calls
 BYPASSED_WARP_DOMAINS = set()
 
-# Legacy MPD converter (always attempt loading for runtime MPD_MODE changes)
+# Legacy MPD converter
 MPDToHLSConverter = None
 decrypt_segment = None
 
@@ -140,7 +140,7 @@ def set_response_header(target: dict, name: str, value: str):
 
 _DYNAMIC_CONFIG_NAMES = {
     "GLOBAL_PROXIES", "TRANSPORT_ROUTES", "ENABLE_WARP", "WARP_PROXY_URL",
-    "WARP_EXCLUDE_DOMAINS", "MPD_MODE", "ENABLE_REMUXING", "DVR_ENABLED",
+    "WARP_EXCLUDE_DOMAINS", "DVR_ENABLED",
     "RECORDINGS_DIR", "MAX_RECORDING_DURATION", "RECORDINGS_RETENTION_DAYS",
     "FLARESOLVERR_URL", "FLARESOLVERR_TIMEOUT", "WARP_OFF_EXTRACTORS",
     "WARP_LICENSE_KEY", "PROXY_TEST_TIMEOUT", "PROXY_TEST_CONCURRENCY",

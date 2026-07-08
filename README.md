@@ -12,7 +12,7 @@ A powerful, lightweight proxy server designed to handle HLS, M3U8, and DASH (MPD
 ## ✨ Features
 
 - **🌐 Universal Proxy**: Seamlessly handles HLS, M3U8, MPD (DASH), and static video files.
-- **🔓 DRM Support**: ClearKey decryption via FFmpeg transcoding or legacy mode.
+- **🔓 DRM Support**: ClearKey decryption via legacy mode.
 - **🔐 Specialized Extractors**: Native support for Vavoo, DaddyliveHD, Sportsonline, VixSrc, DoodStream, EmbedSports, and more.
 - **📼 Integrated DVR**: Record live streams while watching or schedule background recordings.
 - **🛠️ Playlist Builder**: Web interface to combine, manage, and proxy entire M3U playlists.
@@ -36,7 +36,6 @@ docker run -d -p 7860:7860 -v ./data:/data --name EasyProxy ghcr.io/realbestia1/
 #### Prerequisites (All Platforms)
 - **Python 3.11+**
 - **Git** (for cloning dependencies)
-- **FFmpeg** (for stream recording/remuxing)
 
 #### 🪟 Windows Setup
 The easiest way to get EasyProxy plus solvers on Windows:
@@ -85,7 +84,7 @@ For Termux, full functionality requires a 64-bit Android device. On 32-bit devic
 | **Docker** | Standard `docker build .` uses the single `Dockerfile` with solvers included. |
 | **Docker Compose** | Run the complete stack (Proxy + Solvers) with `docker-compose up -d`. |
 | **HuggingFace** | Use `Dockerfile-hf` for seamless deployment on HF Spaces. |
-| **Termux** | Support for Android via Python & FFmpeg. |
+| **Termux** | Support for Android via Python. |
 
 ---
 

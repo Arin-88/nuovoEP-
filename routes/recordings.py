@@ -309,7 +309,7 @@ def setup_recording_routes(app, recording_manager):
                         if not rec or not rec.get('is_active'):
                             logger.debug(f"Recording {recording_id} finished, ending stream")
                             break
-                        # Wait for more data from FFmpeg
+                        # Wait for more data from recording process
                         await asyncio.sleep(0.5)
         except ConnectionResetError:
             logger.debug(f"Client disconnected from recording {recording_id} stream")

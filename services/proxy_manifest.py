@@ -356,218 +356,173 @@ class HLSProxyManifestHandlerMixin:
 
 
             # Stream URL resolved
-            # ✅ MPD/DASH handling based on MPD_MODE
+            # ✅ MPD/DASH handling
             # ✅ FIX: Refined MPD/DASH detection. Use specific patterns to avoid false positives
             # (e.g. "dashinripe" in URL being mistaken for a DASH manifest).
-            _MPD_MODE = _shared.MPD_MODE
             is_mpd = ".mpd" in stream_url.lower() or "/dash/" in stream_url.lower()
             if is_mpd:
-                if _MPD_MODE == "ffmpeg" and self.ffmpeg_manager:
-                    # FFmpeg transcoding mode
-                    logger.info(
-                        f"🔄 [FFmpeg Mode] Routing MPD stream: {stream_url}"
+                # Convert MPD to HLS with server-side decryption
+                logger.info(
+                    f"🔄 [Legacy Mode] Converting MPD to HLS: {stream_url}"
+                )
+
+                if MPDToHLSConverter is None:
+                    logger.error(
+                        "❌ MPDToHLSConverter not available in legacy mode"
                     )
-
-                    clearkey_param = parse_clearkey_params(request)
-
-                    playlist_rel_path = await self.ffmpeg_manager.get_stream(
-                        stream_url, stream_headers, clearkey=clearkey_param
-                    )
-
-                    if playlist_rel_path:
-                        # Construct local URL for the FFmpeg stream
-                        scheme = request.headers.get(
-                            "X-Forwarded-Proto", request.scheme
-                        )
-                        host = request.headers.get("X-Forwarded-Host", request.host)
-                        local_url = (
-                            f"{scheme}://{host}/ffmpeg_stream/{playlist_rel_path}"
-                        )
-
-                        # Generate Master Playlist for compatibility
-                        master_playlist = (
-                            "#EXTM3U\n"
-                            "#EXT-X-VERSION:3\n"
-                            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,NAME="Live"\n'
-                            f"{local_url}\n"
-                        )
-
-                        return web.Response(
-                            text=master_playlist,
-                            content_type="application/vnd.apple.mpegurl",
-                            headers={
-                                "Access-Control-Allow-Origin": "*",
-                                "Cache-Control": "no-cache",
-                            },
-                        )
-                    else:
-                        logger.error("❌ FFmpeg failed to start")
-                        return web.Response(
-                            text="FFmpeg failed to process stream", status=502
-                        )
-                else:
-                    # Legacy mode: use mpd_converter for HLS conversion with server-side decryption
-                    logger.info(
-                        f"🔄 [Legacy Mode] Converting MPD to HLS: {stream_url}"
-                    )
-
-                    if MPDToHLSConverter is None:
-                        logger.error(
-                            "❌ MPDToHLSConverter not available in legacy mode"
-                        )
-                        return web.Response(
-                            text="Legacy MPD converter not available", status=503
-                        )
-
-                    # Fetch the MPD manifest with proxy support
-                    ssl_context = None
-                    disable_ssl = get_ssl_setting_for_url(stream_url)
-                    if disable_ssl:
-                        ssl_context = False
-
-                    manifest_content = None
-                    retries = 2
-                    for attempt in range(retries):
-                        mpd_proxy = None
-                        mpd_session = None
-                        try:
-                            # Use helper to get proxy-enabled session
-                            mpd_session, mpd_proxy = await self._get_proxy_session(
-                                stream_url, bypass_warp=bypass_warp, forced_proxy=selected_proxy
-                            )
-                            if mpd_proxy:
-                                logger.info(
-                                    f"📡 [MPD] Attempt {attempt+1}/{retries} via proxy: {mpd_proxy}"
-                                )
-
-                            async with mpd_session.get(
-                                stream_url,
-                                headers=stream_headers,
-                                ssl=ssl_context,
-                                allow_redirects=True,
-                            ) as resp:
-                                # Capture final URL after redirects
-                                final_mpd_url = str(resp.url)
-                                if final_mpd_url != stream_url:
-                                    logger.info(f"↪️ MPD redirected to: {final_mpd_url}")
-
-                                if resp.status != 200:
-                                    error_text = await resp.text()
-                                    logger.error(f"❌ Failed to fetch MPD (Status {resp.status}) at {stream_url}")
-                                    if attempt == retries - 1:
-                                        return web.Response(
-                                            text=f"Failed to fetch MPD: {resp.status}\nResponse: {error_text[:1000]}",
-                                            status=502,
-                                        )
-                                    await asyncio.sleep(1)
-                                    continue
-
-                                manifest_content = await resp.text()
-                                break # Success
-
-                        except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, OSError) as e:
-                            is_proxy = isinstance(e, ALL_PROXY_ERRORS)
-                            # Consider ClientConnectionError/OSError as proxy errors if a proxy was used
-                            if not is_proxy and mpd_proxy and isinstance(e, (ClientConnectionError, OSError)):
-                                is_proxy = True
-
-                            err_type = "Proxy" if is_proxy else "Timeout"
-                            logger.warning(f"⚠️ [MPD] {err_type} error at attempt {attempt+1}: {e}")
-
-                            # Mark local proxy as dead if it failed
-                            if mpd_proxy and "127.0.0.1" in mpd_proxy:
-                                self._mark_proxy_dead_if_allowed(
-                                    mpd_proxy,
-                                    extractor_key=request.query.get("extractor_key"),
-                                )
-                            # Clear sticky context if it's a proxy error
-                            if is_proxy and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
-                                logger.info("   [MPD] Clearing sticky proxy context due to ProxyError")
-                                SELECTED_PROXY_CONTEXT.set(None)
-
-                            if attempt < retries - 1:
-                                logger.info("   [MPD] Retrying...")
-                                await asyncio.sleep(1)
-                            else:
-                                return web.Response(text=f"MPD unreachable: {e}", status=502)
-                        except Exception as e:
-                            logger.error(f"❌ [MPD] Unexpected error at attempt {attempt+1}: {e}")
-                            if attempt == retries - 1:
-                                return web.Response(text=f"Unexpected error fetching MPD: {e}", status=500)
-                            await asyncio.sleep(1)
-                        finally:
-                            if mpd_session and mpd_proxy:
-                                await mpd_session.close()
-
-                    if manifest_content is None:
-                         return web.Response(text="Failed to fetch MPD manifest after all attempts", status=502)
-
-                    # Build proxy base URL
-                    scheme = request.headers.get(
-                        "X-Forwarded-Proto", request.scheme
-                    )
-                    host = request.headers.get("X-Forwarded-Host", request.host)
-                    proxy_base = f"{scheme}://{host}"
-
-                    # Build params string with headers
-                    params = "".join(
-                        [
-                            f"&h_{urllib.parse.quote(key)}={urllib.parse.quote(value)}"
-                            for key, value in stream_headers.items()
-                        ]
-                    )
-
-                    # Add api_password if present
-                    api_password = request.query.get("api_password")
-                    if api_password:
-                        params += f"&api_password={api_password}"
-
-                    clearkey_param = parse_clearkey_params(request)
-
-                    if clearkey_param:
-                        params += f"&clearkey={clearkey_param}"
-
-                    # Pass 'ext' param if present (e.g. ext=ts)
-                    ext_param = request.query.get("ext")
-                    if ext_param:
-                        params += f"&ext={ext_param}"
-
-                    # Propagate warp=off and proxy=off to generated HLS URLs
-                    if bypass_warp:
-                        params += "&warp=off"
-                    if bypass_proxies:
-                        params += "&proxy=off"
-
-                    # Check if requesting specific representation
-                    rep_id = request.query.get("rep_id")
-
-                    converter = MPDToHLSConverter()
-                    if rep_id:
-                        # Generate media playlist for specific representation
-                        # Use final_mpd_url (after redirects) for segment URL construction
-                        hls_content = converter.convert_media_playlist(
-                            manifest_content,
-                            rep_id,
-                            proxy_base,
-                            final_mpd_url,
-                            params,
-                            clearkey_param,
-                        )
-                    else:
-                        # Generate master playlist
-                        # Use final_mpd_url (after redirects) for segment URL construction
-                        hls_content = converter.convert_master_playlist(
-                            manifest_content, proxy_base, final_mpd_url, params
-                        )
-
                     return web.Response(
-                        text=hls_content,
-                        content_type="application/vnd.apple.mpegurl",
-                        headers={
-                            "Access-Control-Allow-Origin": "*",
-                            "Cache-Control": "no-cache",
-                        },
+                        text="Legacy MPD converter not available", status=503
                     )
+
+                # Fetch the MPD manifest with proxy support
+                ssl_context = None
+                disable_ssl = get_ssl_setting_for_url(stream_url)
+                if disable_ssl:
+                    ssl_context = False
+
+                manifest_content = None
+                retries = 2
+                for attempt in range(retries):
+                    mpd_proxy = None
+                    mpd_session = None
+                    try:
+                        # Use helper to get proxy-enabled session
+                        mpd_session, mpd_proxy = await self._get_proxy_session(
+                            stream_url, bypass_warp=bypass_warp, forced_proxy=selected_proxy
+                        )
+                        if mpd_proxy:
+                            logger.info(
+                                f"📡 [MPD] Attempt {attempt+1}/{retries} via proxy: {mpd_proxy}"
+                            )
+
+                        async with mpd_session.get(
+                            stream_url,
+                            headers=stream_headers,
+                            ssl=ssl_context,
+                            allow_redirects=True,
+                        ) as resp:
+                            # Capture final URL after redirects
+                            final_mpd_url = str(resp.url)
+                            if final_mpd_url != stream_url:
+                                logger.info(f"↪️ MPD redirected to: {final_mpd_url}")
+
+                            if resp.status != 200:
+                                error_text = await resp.text()
+                                logger.error(f"❌ Failed to fetch MPD (Status {resp.status}) at {stream_url}")
+                                if attempt == retries - 1:
+                                    return web.Response(
+                                        text=f"Failed to fetch MPD: {resp.status}\nResponse: {error_text[:1000]}",
+                                        status=502,
+                                    )
+                                await asyncio.sleep(1)
+                                continue
+
+                            manifest_content = await resp.text()
+                            break # Success
+
+                    except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, OSError) as e:
+                        is_proxy = isinstance(e, ALL_PROXY_ERRORS)
+                        # Consider ClientConnectionError/OSError as proxy errors if a proxy was used
+                        if not is_proxy and mpd_proxy and isinstance(e, (ClientConnectionError, OSError)):
+                            is_proxy = True
+
+                        err_type = "Proxy" if is_proxy else "Timeout"
+                        logger.warning(f"⚠️ [MPD] {err_type} error at attempt {attempt+1}: {e}")
+
+                        # Mark local proxy as dead if it failed
+                        if mpd_proxy and "127.0.0.1" in mpd_proxy:
+                            self._mark_proxy_dead_if_allowed(
+                                mpd_proxy,
+                                extractor_key=request.query.get("extractor_key"),
+                            )
+                        # Clear sticky context if it's a proxy error
+                        if is_proxy and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
+                            logger.info("   [MPD] Clearing sticky proxy context due to ProxyError")
+                            SELECTED_PROXY_CONTEXT.set(None)
+
+                        if attempt < retries - 1:
+                            logger.info("   [MPD] Retrying...")
+                            await asyncio.sleep(1)
+                        else:
+                            return web.Response(text=f"MPD unreachable: {e}", status=502)
+                    except Exception as e:
+                        logger.error(f"❌ [MPD] Unexpected error at attempt {attempt+1}: {e}")
+                        if attempt == retries - 1:
+                            return web.Response(text=f"Unexpected error fetching MPD: {e}", status=500)
+                        await asyncio.sleep(1)
+                    finally:
+                        if mpd_session and mpd_proxy:
+                            await mpd_session.close()
+
+                if manifest_content is None:
+                     return web.Response(text="Failed to fetch MPD manifest after all attempts", status=502)
+
+                # Build proxy base URL
+                scheme = request.headers.get(
+                    "X-Forwarded-Proto", request.scheme
+                )
+                host = request.headers.get("X-Forwarded-Host", request.host)
+                proxy_base = f"{scheme}://{host}"
+
+                # Build params string with headers
+                params = "".join(
+                    [
+                        f"&h_{urllib.parse.quote(key)}={urllib.parse.quote(value)}"
+                        for key, value in stream_headers.items()
+                    ]
+                )
+
+                # Add api_password if present
+                api_password = request.query.get("api_password")
+                if api_password:
+                    params += f"&api_password={api_password}"
+
+                clearkey_param = parse_clearkey_params(request)
+
+                if clearkey_param:
+                    params += f"&clearkey={clearkey_param}"
+
+                # Pass 'ext' param if present (e.g. ext=ts)
+                ext_param = request.query.get("ext")
+                if ext_param:
+                    params += f"&ext={ext_param}"
+
+                # Propagate warp=off and proxy=off to generated HLS URLs
+                if bypass_warp:
+                    params += "&warp=off"
+                if bypass_proxies:
+                    params += "&proxy=off"
+
+                # Check if requesting specific representation
+                rep_id = request.query.get("rep_id")
+
+                converter = MPDToHLSConverter()
+                if rep_id:
+                    # Generate media playlist for specific representation
+                    # Use final_mpd_url (after redirects) for segment URL construction
+                    hls_content = converter.convert_media_playlist(
+                        manifest_content,
+                        rep_id,
+                        proxy_base,
+                        final_mpd_url,
+                        params,
+                        clearkey_param,
+                    )
+                else:
+                    # Generate master playlist
+                    # Use final_mpd_url (after redirects) for segment URL construction
+                    hls_content = converter.convert_master_playlist(
+                        manifest_content, proxy_base, final_mpd_url, params
+                    )
+
+                return web.Response(
+                    text=hls_content,
+                    content_type="application/vnd.apple.mpegurl",
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Cache-Control": "no-cache",
+                    },
+                )
 
             # Procedi con il proxy dello stream (passando l'eventuale bypass_warp attivato dall'estrattore e il proxy selezionato)
             return await self._proxy_stream(request, stream_url, stream_headers, bypass_warp=bypass_warp, forced_proxy=selected_proxy, force_direct=force_direct)

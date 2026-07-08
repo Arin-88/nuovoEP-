@@ -45,7 +45,7 @@ class MPDToHLSConverter:
                 manifest_content = manifest_content.replace('<MPD', '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"', 1)
             
             root = ET.fromstring(manifest_content)
-            lines = ['#EXTM3U', '#EXT-X-VERSION:3']
+            lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
             
             # Trova AdaptationSet Video e Audio
             video_sets = []
@@ -72,35 +72,55 @@ class MPDToHLSConverter:
             audio_group_id = 'audio'
             has_audio = False
             
+            # Raccogli e ordina le rappresentazioni audio per dare priorità a AAC (mp4a) rispetto a Dolby Digital Plus (ec3)
+            audio_reps = []
             for adaptation_set in audio_sets:
                 for representation in adaptation_set.findall('mpd:Representation', self.ns):
-                    rep_id = representation.get('id')
-                    bandwidth = representation.get('bandwidth', '128000') # Default fallback
-                    
-                    # Costruisci URL Media Playlist Audio
-                    encoded_url = urllib.parse.quote(original_url, safe='')
-                    header_params = self._extract_header_params(params)
-                    media_url = f"{proxy_base}/proxy/hls/manifest.m3u8?d={encoded_url}&format=hls&rep_id={rep_id}{header_params}"
-                    
-                    # Usa GROUP-ID 'audio' e NAME basato su ID o lingua
-                    lang = adaptation_set.get('lang', 'und')
-                    name = f"Audio {lang} ({bandwidth})"
-                    
-                    # EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="...",DEFAULT=YES,AUTOSELECT=YES,URI="..."
-                    # Impostiamo DEFAULT=YES solo per il primo
-                    default_attr = "YES" if not has_audio else "NO"
-                    
-                    lines.append(f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="{audio_group_id}",NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_attr},AUTOSELECT=YES,URI="{media_url}"')
-                    has_audio = True
+                    audio_reps.append((adaptation_set, representation))
+            
+            def sort_audio_func(item):
+                rep = item[1]
+                rep_id = rep.get('id', '').lower()
+                codecs = rep.get('codecs', '').lower()
+                if 'mp4a' in rep_id or 'aac' in rep_id or 'mp4a' in codecs or 'aac' in codecs:
+                    return 0
+                return 1
+                
+            audio_reps.sort(key=sort_audio_func)
 
-            if has_audio:
-                lines[1] = '#EXT-X-VERSION:4'
+            for adaptation_set, representation in audio_reps:
+                rep_id = representation.get('id')
+                bandwidth = representation.get('bandwidth', '128000') # Default fallback
+                codecs = representation.get('codecs')
+                
+                # Costruisci URL Media Playlist Audio
+                encoded_url = urllib.parse.quote(original_url, safe='')
+                header_params = self._extract_header_params(params)
+                media_url = f"{proxy_base}/proxy/hls/manifest.m3u8?d={encoded_url}&format=hls&rep_id={rep_id}{header_params}"
+                
+                # Usa GROUP-ID 'audio' e NAME basato su ID o lingua
+                lang = adaptation_set.get('lang', 'und')
+                name = f"Audio {lang} ({bandwidth})"
+                
+                # EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="...",DEFAULT=YES,AUTOSELECT=YES,URI="..."
+                # Impostiamo DEFAULT=YES solo per il primo (che ora sarà AAC se disponibile)
+                default_attr = "YES" if not has_audio else "NO"
+                
+                media_line = f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="{audio_group_id}",NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_attr},AUTOSELECT=YES,URI="{media_url}"'
+                lines.append(media_line)
+                has_audio = True
+
+            if has_audio or "format=hls" in params:
+                lines[1] = '#EXT-X-VERSION:6'
 
             # --- GESTIONE VIDEO (EXT-X-STREAM-INF) ---
             # Calcola max height per forzare qualità massima (fix iOS/Stremio)
             max_height = 0
             for adaptation_set in video_sets:
                 for rep in adaptation_set.findall('mpd:Representation', self.ns):
+                    rep_id = rep.get('id', '')
+                    if 'iframe' in rep_id.lower() or 'i-frame' in rep_id.lower():
+                        continue
                     try:
                         h = int(rep.get("height", 0))
                         if h > max_height: max_height = h
@@ -110,6 +130,9 @@ class MPDToHLSConverter:
 
             for adaptation_set in video_sets:
                 for representation in adaptation_set.findall('mpd:Representation', self.ns):
+                    rep_id = representation.get('id', '')
+                    if 'iframe' in rep_id.lower() or 'i-frame' in rep_id.lower():
+                        continue
                     try:
                         curr_h = int(representation.get("height", 0))
                         if curr_h < max_height: continue
@@ -179,9 +202,7 @@ class MPDToHLSConverter:
             # fMP4 richiede HLS versione 6 o 7, ma per .ts output usiamo v3 per compatibilità
             # Per LIVE: non usare VOD e non aggiungere ENDLIST
             if is_live:
-                lines = ['#EXTM3U', '#EXT-X-VERSION:3']
-                # Start 30 seconds from the end (live edge) to provide more buffer
-                lines.append('#EXT-X-START:TIME-OFFSET=-30.0,PRECISE=NO')
+                lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
             else:
                 lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:10', '#EXT-X-PLAYLIST-TYPE:VOD']
             
@@ -229,15 +250,13 @@ class MPDToHLSConverter:
                 except Exception as e:
                     logger.error(f"Error parsing clearkey_param: {e}")
 
-            # --- Check for forced TS extension ---
-            # If ext=ts is passed OR default, we force server side logic to remux to TS
-            # even if no key is present (skip_decrypt=1)
-            ext_param = "ts" # Default to TS as requested
-            if "ext=mp4" in params: # Allow opting out
-                 ext_param = "mp4"
+            # --- Check for forced extension ---
+            ext_param = "mp4" # Default to MP4/fMP4 since remuxing is disabled
+            if "ext=ts" in params:
+                 ext_param = "ts"
             
             if ext_param == "ts" and not server_side_decryption:
-                 logger.debug(f"🔄 Forced TS remux requested (ext=ts)")
+                 logger.debug(f"🔄 Concatenation requested (ext=ts)")
                  server_side_decryption = True
                  # Use dummy key/id to satisfy the endpoint requirement, and set skip_decrypt=1
                  decryption_params = "&key=00000000000000000000000000000000&key_id=00000000000000000000000000000000&skip_decrypt=1"
@@ -272,13 +291,13 @@ class MPDToHLSConverter:
                     full_init_url = urljoin(base_url, init_url)
                     encoded_init_url = urllib.parse.quote(full_init_url, safe='')
                     
-                    # Aggiungiamo EXT-X-MAP solo se NON usiamo decrittazione server
-                    # Quando usiamo ffmpeg per decrittare, ogni segmento include già il moov
-                    if not server_side_decryption:
-                        header_params = self._extract_header_params(params)
+                    header_params = self._extract_header_params(params)
+                    if server_side_decryption:
+                        proxy_init_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_init_url}&is_init=1{decryption_params}{header_params}"
+                    else:
                         proxy_init_url = f"{proxy_base}/segment/init.mp4?base_url={encoded_init_url}{header_params}"
-                        lines.append(f'#EXT-X-MAP:URI="{proxy_init_url}"')
-                        lines[1] = '#EXT-X-VERSION:6'
+                    lines.append(f'#EXT-X-MAP:URI="{proxy_init_url}"')
+                    lines[1] = '#EXT-X-VERSION:6'
 
                 # --- SEGMENT TIMELINE ---
                 segment_timeline = segment_template.find('mpd:SegmentTimeline', self.ns)
@@ -313,13 +332,77 @@ class MPDToHLSConverter:
                     segments_to_use = all_segments
                     
                     if is_live and len(all_segments) > 0:
-                        # Per LIVE: Sliding window - usa solo gli ultimi 20 segmenti
-                        # Questo evita che la playlist cresca all'infinito e mantiene il player "in sync"
-                        MAX_SEGMENTS = 20
-                        if len(all_segments) > MAX_SEGMENTS:
-                             segments_to_use = all_segments[-MAX_SEGMENTS:]
+                        # Calculate global last time and global first time across all video and audio representations in this MPD XML
+                        global_last_time_sec = 0.0
+                        global_first_time_sec = 0.0
+                        for period in root.findall('.//mpd:Period', self.ns):
+                            for aset in period.findall('mpd:AdaptationSet', self.ns):
+                                mime = aset.get('mimeType', '')
+                                if not mime:
+                                    rep = aset.find('mpd:Representation', self.ns)
+                                    if rep is not None:
+                                        mime = rep.get('mimeType', '')
+                                if 'video' in mime or 'audio' in mime:
+                                    template = aset.find('mpd:SegmentTemplate', self.ns)
+                                    for r in aset.findall('mpd:Representation', self.ns):
+                                        r_template = r.find('mpd:SegmentTemplate', self.ns) or template
+                                        if r_template is not None:
+                                            r_timescale = int(r_template.get('timescale', '1'))
+                                            timeline = r_template.find('mpd:SegmentTimeline', self.ns)
+                                            if timeline is not None:
+                                                first_t = None
+                                                last_t = None
+                                                last_d = 0
+                                                for s in timeline.findall('mpd:S', self.ns):
+                                                    t = s.get('t')
+                                                    if t:
+                                                        temp_t = int(t)
+                                                        if first_t is None:
+                                                            first_t = temp_t
+                                                        last_t = temp_t
+                                                    d = int(s.get('d'))
+                                                    r_rep = int(s.get('r', '0'))
+                                                    if last_t is not None:
+                                                        last_t += d * r_rep
+                                                        last_d = d
+                                                if first_t is not None:
+                                                    first_seg_time_sec = first_t / r_timescale
+                                                    if first_seg_time_sec > global_first_time_sec:
+                                                        global_first_time_sec = first_seg_time_sec
+                                                if last_t is not None:
+                                                    last_seg_time_sec = (last_t + last_d) / r_timescale
+                                                    if last_seg_time_sec > global_last_time_sec:
+                                                        global_last_time_sec = last_seg_time_sec
+
+                        # Fallback if global variables couldn't be calculated
+                        if global_last_time_sec == 0.0:
+                            global_last_time_sec = all_segments[-1]['time'] / timescale
+                        if global_first_time_sec == 0.0:
+                            global_first_time_sec = all_segments[0]['time'] / timescale
+
+                        # Force monotonicity for the live edge timestamp to shield against CDN cache jitter.
+                        # We use the base URL (without query params) as the unique stream key.
+                        stream_key = original_url.split('?')[0]
+                        if not hasattr(self.__class__, '_last_times'):
+                            self.__class__._last_times = {}
+                        
+                        previous_max = self.__class__._last_times.get(stream_key, 0.0)
+                        if 0.0 < previous_max - global_last_time_sec < 60.0:
+                            # Clamp to previous maximum to keep window start monotonic
+                            global_last_time_sec = previous_max
                         else:
-                             segments_to_use = all_segments
+                            # Update cache (or accept large resets)
+                            self.__class__._last_times[stream_key] = global_last_time_sec
+
+                        # Keep only segments starting within the last 12 seconds of the global live edge.
+                        # Clamp window start to global_first_time_sec so we never request segments that don't exist in one of the tracks.
+                        # Apply a 1.0 second tolerance (half of segment duration) to account for slight float alignment differences.
+                        window_start_sec = max(global_last_time_sec - 30.0, global_first_time_sec)
+                        segments_to_use = [seg for seg in all_segments if seg['time'] / timescale >= window_start_sec - 1.0]
+                        if not segments_to_use:
+                            segments_to_use = [all_segments[-1]]
+
+                        logger.debug(f"📐 [Window] rep={rep_id} edge={global_last_time_sec:.1f} first={global_first_time_sec:.1f} win={window_start_sec:.1f} segs={len(segments_to_use)} start_ts={segments_to_use[0]['time']/timescale:.1f} seq={int(round(segments_to_use[0]['time']/timescale/2.0))}")
 
                         total_duration = sum(seg['duration'] for seg in segments_to_use)
                         
@@ -335,12 +418,9 @@ class MPDToHLSConverter:
                         # Questo garantisce che video e audio abbiano lo stesso MEDIA-SEQUENCE
                         # anche se hanno timestamp leggermente diversi, perché usiamo il floor.
                         if len(segments_to_use) > 0:
-                            first_seg_time = segments_to_use[0]['time']
-                            segment_duration_ts = segments_to_use[0]['d']  # Duration in timescale units
-                            
-                            # Calcola sequence number basato sul tempo
-                            # Usa floor division per consistenza tra video/audio
-                            media_sequence = first_seg_time // segment_duration_ts
+                            first_seg = segments_to_use[0]
+                            first_seg_time_sec = first_seg['time'] / timescale
+                            media_sequence = int(round(first_seg_time_sec / 2.0))
                             
                             lines.append(f'#EXT-X-TARGETDURATION:{int(max_duration) + 1}')
                             lines.append(f'#EXT-X-MEDIA-SEQUENCE:{media_sequence}')
@@ -376,7 +456,7 @@ class MPDToHLSConverter:
                         header_params = self._extract_header_params(params)
                         
                         if server_side_decryption:
-                            decrypt_url = f"{proxy_base}/decrypt/segment.ts?url={encoded_seg_url}&init_url={encoded_init_url}{decryption_params}{header_params}"
+                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{header_params}"
                             lines.append(decrypt_url)
                         else:
                             proxy_seg_url = f"{proxy_base}/segment/{seg_filename}?base_url={encoded_seg_url}{header_params}"
@@ -419,7 +499,7 @@ class MPDToHLSConverter:
                         header_params = self._extract_header_params(params)
                         orig_ext = os.path.splitext(seg_name.split('?')[0])[1] or '.m4s'
                         if server_side_decryption:
-                            decrypt_url = f"{proxy_base}/decrypt/segment.ts?url={encoded_seg_url}&init_url={encoded_init_url}{decryption_params}{header_params}"
+                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{header_params}"
                             seg_url = decrypt_url
                         else:
                             seg_url = f"{proxy_base}/segment/seg_{seg_num}{orig_ext}?base_url={encoded_seg_url}{header_params}"

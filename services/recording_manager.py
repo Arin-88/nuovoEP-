@@ -38,7 +38,7 @@ class StreamConfig:
 
 
 class RecordingManager:
-    """Manages FFmpeg recording processes for DVR functionality."""
+    """Manages recording processes for DVR functionality."""
 
     # Stream types that benefit from reconnection (proxy handles token refresh)
     RECONNECT_TYPES = {StreamType.VAVOO, StreamType.FREESHOT,
@@ -120,7 +120,7 @@ class RecordingManager:
 
         MPD streams are converted to HLS by the proxy and may have:
         - ClearKey DRM requiring decryption parameters
-        - Separate audio tracks requiring dual-input FFmpeg
+        - Separate audio tracks requiring dual-input recorder
         """
         proxy_params = self._build_proxy_params(url)
 
@@ -483,7 +483,7 @@ class RecordingManager:
             stderr_text = stderr.decode() if stderr else ""
 
             if stderr_text:
-                logger.debug(f"Recording {recording_id} FFmpeg output: {stderr_text[:1000]}")
+                logger.debug(f"Recording {recording_id} recorder output: {stderr_text[:1000]}")
 
             if process.returncode == 0:
                 logger.info(f"Recording {recording_id} completed successfully")

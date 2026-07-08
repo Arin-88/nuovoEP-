@@ -828,14 +828,12 @@ def reload_config():
     mod.PROXY_EXCLUDE_DOMAINS = _get_dynamic_proxy_exclude_domains()
     mod.GLOBAL_PROXIES = _get_dynamic_global_proxies()
     mod.TRANSPORT_ROUTES = _get_dynamic_transport_routes()
-    mod.MPD_MODE = _cfg_get("mpd_mode", "legacy")
     mod.DVR_ENABLED = _cfg_get("dvr_enabled", False)
     mod.RECORDINGS_DIR = _cfg_get("recordings_dir", "/data/recordings")
     mod.MAX_RECORDING_DURATION = _cfg_get("max_recording_duration", 28800)
     mod.RECORDINGS_RETENTION_DAYS = _cfg_get("recordings_retention_days", 7)
     mod.FLARESOLVERR_URL = _cfg_get("flaresolverr_url", "http://localhost:8191")
     mod.FLARESOLVERR_TIMEOUT = _cfg_get("flaresolverr_timeout", 30)
-    mod.ENABLE_REMUXING = _cfg_get("enable_remuxing", True)
     mod.PROXY_TEST_TIMEOUT = _cfg_get("proxy_test_timeout", 10)
     mod.PROXY_TEST_CONCURRENCY = _get_dynamic_proxy_test_concurrency()
     mod.LOG_LEVEL_STR = _cfg_get("log_level", LOG_LEVEL_STR)
@@ -862,14 +860,12 @@ def __getattr__(name):
         "PROXY_EXCLUDE_DOMAINS": _get_dynamic_proxy_exclude_domains,
         "GLOBAL_PROXIES": _get_dynamic_global_proxies,
         "TRANSPORT_ROUTES": _get_dynamic_transport_routes,
-        "MPD_MODE": lambda: _cfg_get("mpd_mode", "legacy"),
         "DVR_ENABLED": lambda: _cfg_get("dvr_enabled", False),
         "RECORDINGS_DIR": lambda: _cfg_get("recordings_dir", "/data/recordings"),
         "MAX_RECORDING_DURATION": lambda: _cfg_get("max_recording_duration", 28800),
         "RECORDINGS_RETENTION_DAYS": lambda: _cfg_get("recordings_retention_days", 7),
         "FLARESOLVERR_URL": lambda: _cfg_get("flaresolverr_url", "http://localhost:8191"),
         "FLARESOLVERR_TIMEOUT": lambda: _cfg_get("flaresolverr_timeout", 30),
-        "ENABLE_REMUXING": lambda: _cfg_get("enable_remuxing", True),
         "WARP_LICENSE_KEY": lambda: _cfg_get("warp_license_key", ""),
         "PROXY_TEST_TIMEOUT": lambda: int(_cfg_get("proxy_test_timeout", 10)),
         "PROXY_TEST_CONCURRENCY": _get_dynamic_proxy_test_concurrency,
@@ -974,7 +970,7 @@ def get_system_stats():
         ram_free = max(0, docker_limit - docker_used)
         ram_percent = (ram_used / ram_total) * 100 if ram_total > 0 else 0
 
-    # EasyProxy process RAM (including child processes like ffmpeg, chrome, etc.)
+    # EasyProxy process RAM (including child processes)
     proxy_ram_used = ram_used
     proxy_ram_total = ram_total
     proxy_ram_percent = ram_percent

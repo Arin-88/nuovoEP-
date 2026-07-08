@@ -948,9 +948,8 @@ class HLSProxyStreamingMixin:
                     # Recupera parametri
                     clearkey_param = parse_clearkey_params(request)
 
-                    # --- LEGACY MODE: MPD -> HLS Conversion ---
-                    _MPD_MODE = _shared.MPD_MODE
-                    if _MPD_MODE in ("legacy", "none", "disabled") and MPDToHLSConverter:
+                    # --- MPD -> HLS Conversion ---
+                    if MPDToHLSConverter:
                         logger.info(
                             f"🔄 [Legacy Mode] Converting MPD to HLS for {stream_url}"
                         )
@@ -1293,68 +1292,7 @@ class HLSProxyStreamingMixin:
             if need_close and retry_session and not retry_session.closed:
                 await retry_session.close()
 
-    async def _remux_to_ts(self, content):
-        """Converte segmenti (fMP4) in MPEG-TS usando FFmpeg pipe."""
-        try:
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                "pipe:0",
-                "-c",
-                "copy",
-                "-copyts",
-                "-f",
-                "mpegts",
-                "pipe:1",
-            ]
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            try:
-                proc.stdin.write(content)
-                await proc.stdin.drain()
-                proc.stdin.close()
-
-                chunks = []
-                while True:
-                    chunk = await proc.stdout.read(65536)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-
-                stderr = await proc.stderr.read()
-                stdout = b"".join(chunks)
-
-                await proc.wait()
-            finally:
-                if proc.returncode is None:
-                    try:
-                        proc.kill()
-                        await proc.wait()
-                    except Exception:
-                        pass
-
-            if len(stdout) > 0:
-                if proc.returncode != 0:
-                    logger.debug(
-                        f"FFmpeg remux finished with code {proc.returncode} but produced output (ignoring). Stderr: {stderr.decode()[:200]}"
-                    )
-                return stdout
-
-            if proc.returncode != 0:
-                logger.error(f"❌ FFmpeg remux failed: {stderr.decode()}")
-                return None
-
-            return stdout
-        except Exception as e:
-            logger.error(f"❌ Remux error: {e}")
-            return None
 
     async def handle_decrypt_segment(self, request):
         """Decripta segmenti fMP4 lato server per ClearKey (legacy mode)."""
@@ -1368,12 +1306,19 @@ class HLSProxyStreamingMixin:
         key = request.query.get("key")
         key_id = request.query.get("key_id")
 
-        if not url or not key or not key_id:
-            return web.Response(text="Missing url, key, or key_id", status=400)
+        is_init = request.query.get("is_init") == "1"
+        skip_init = request.query.get("skip_init") == "1"
+
+        if is_init:
+            init_url = url
+            url = None
+
+        if not (url or init_url) or not key or not key_id:
+            return web.Response(text="Missing url/init_url, key, or key_id", status=400)
 
         if decrypt_segment is None:
             return web.Response(
-                text="Decrypt not available (MPD_MODE is ffmpeg or disabled)", status=503
+                text="Decrypt not available", status=503
             )
 
         try:
@@ -1391,10 +1336,10 @@ class HLSProxyStreamingMixin:
                 forced_proxy = None
                 _shared.BYPASS_PROXIES_CONTEXT.set(True)
             logger.debug(f"🔍 [Decrypt-DEBUG] bypass_warp={bypass_warp}, forced_proxy={forced_proxy}, warp_param='{request.query.get('warp', 'NOT_FOUND')}'")
-            proxy_from_config = get_proxy_for_url(url, bypass_warp=bypass_warp)
+            proxy_from_config = get_proxy_for_url(url or init_url, bypass_warp=bypass_warp)
             logger.debug(f"🔍 [Decrypt-DEBUG] get_proxy_for_url returned: {proxy_from_config}")
             segment_session, segment_proxy = await self._get_proxy_session(
-                url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
+                url or init_url, bypass_warp=bypass_warp, forced_proxy=forced_proxy
             )
             if segment_proxy:
                 logger.info(f"📡 [Decrypt] Using session via proxy: {segment_proxy}")
@@ -1404,6 +1349,13 @@ class HLSProxyStreamingMixin:
                 async def fetch_init():
                     if not init_url:
                         return b""
+                    # Check cache
+                    cache_key = f"{init_url}_{key}_{key_id}"
+                    cached_val = self.init_segment_cache.get(cache_key)
+                    if cached_val is not None:
+                        logger.debug(f"💾 Using cached init segment: {init_url.split('/')[-1]}")
+                        return cached_val
+
                     disable_ssl = get_ssl_setting_for_url(init_url)
                     try:
                         async with segment_session.get(
@@ -1414,6 +1366,8 @@ class HLSProxyStreamingMixin:
                         ) as resp:
                             if resp.status == 200:
                                 content = await resp.read()
+                                if content:
+                                    self.init_segment_cache[cache_key] = content
                                 return content
                             logger.error(
                                 f"❌ Init segment returned status {resp.status}: {init_url}"
@@ -1424,6 +1378,8 @@ class HLSProxyStreamingMixin:
                         return None
 
                 async def fetch_segment():
+                    if not url:
+                        return b""
                     disable_ssl = get_ssl_setting_for_url(url)
                     try:
                         async with segment_session.get(
@@ -1453,41 +1409,36 @@ class HLSProxyStreamingMixin:
             if init_content is None and init_url:
                 logger.error(f"❌ Failed to fetch init segment")
                 return web.Response(status=502)
-            if segment_content is None:
+            if segment_content is None and url:
                 logger.error(f"❌ Failed to fetch segment")
                 return web.Response(status=502)
 
             init_content = init_content or b""
+            segment_content = segment_content or b""
 
             # Check if we should skip decryption (null key case)
             skip_decrypt = request.query.get("skip_decrypt") == "1"
 
             if skip_decrypt:
-                # Null key: just concatenate init + segment without decryption
-                logger.info(f"🔓 Skip decrypt mode - remuxing without decryption")
-                combined_content = init_content + segment_content
+                # Null key: just return appropriate parts
+                logger.info(f"🔓 Skip decrypt mode - serving without decryption")
+                if skip_init:
+                    combined_content = segment_content
+                elif is_init:
+                    combined_content = init_content
+                else:
+                    combined_content = init_content + segment_content
             else:
                 # Decripta con PyCryptodome
                 # Decrypt in thread pool to avoid blocking event loop
                 loop = asyncio.get_event_loop()
                 combined_content = await loop.run_in_executor(
-                    None, decrypt_segment, init_content, segment_content, key_id, key
+                    None, decrypt_segment, init_content, segment_content, key_id, key, skip_init
                 )
 
-            # Leggero REMUX to TS (if enabled)
-            if _shared.ENABLE_REMUXING:
-                ts_content = await self._remux_to_ts(combined_content)
-                if not ts_content:
-                    logger.warning("⚠️ Remux failed, serving raw fMP4")
-                    ts_content = combined_content
-                    content_type = "video/mp4"
-                else:
-                    content_type = "video/mp2t"
-                    logger.info("⚡ Remuxed fMP4 -> TS")
-            else:
-                logger.debug("⏩ Remuxing disabled, serving raw fMP4")
-                ts_content = combined_content
-                content_type = "video/mp4"
+            # Serve raw decrypted fMP4
+            ts_content = combined_content
+            content_type = "video/mp4"
 
             # Invia Risposta
             return web.Response(

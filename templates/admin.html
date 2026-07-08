@@ -544,23 +544,7 @@
             </div>
         </div>
 
-        <!-- MPD / DASH -->
-        <div class="card">
-            <h2><span class="icon">🎬</span> MPD &amp; DASH</h2>
-            <div class="row">
-                <label>MPD Mode</label>
-                <select id="mpd-mode" onchange="saveField('mpd_mode', this.value)">
-                    <option value="legacy">Legacy</option>
-                    <option value="ffmpeg">FFmpeg</option>
-                    <option value="none">None</option>
-                </select>
-            </div>
-            <div class="row">
-                <label>Remuxing</label>
-                <div id="remux-toggle" class="toggle" onclick="toggleRemux()"></div>
-                <span id="remux-label" class="badge badge-off">OFF</span>
-            </div>
-        </div>
+
 
         <!-- DVR -->
         <div class="card">
@@ -759,8 +743,8 @@ async function loadConfig() {
         renderProxyOffToggles(config.available_extractors || [], config.proxy_off_extractors || []);
         renderExcludeDomains();
         renderProxyExcludeDomains();
-        document.getElementById('mpd-mode').value = config.mpd_mode || 'legacy';
-        setToggle('remux-toggle', config.enable_remuxing !== false);
+
+
         setToggle('dvr-toggle', config.dvr_enabled || false);
         document.getElementById('dvr-max').value = config.max_recording_duration || 28800;
         document.getElementById('dvr-retention').value = config.recordings_retention_days || 7;
@@ -1118,11 +1102,7 @@ async function removeExtractorProxy(name) {
     } else { toast('Failed to remove', 'error'); }
 }
 
-async function toggleRemux() {
-    const newVal = !config.enable_remuxing;
-    await saveField('enable_remuxing', newVal);
-    setToggle('remux-toggle', newVal);
-}
+
 
 async function toggleDvr() {
     const newVal = !config.dvr_enabled;
