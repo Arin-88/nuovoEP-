@@ -244,6 +244,7 @@ class HLSProxyPagesMixin:
         await self._refresh_latest_version()
 
         stats = get_system_stats()
+        active_streams = _shared.get_active_streams()
 
         info = {
             "proxy": "EasyProxy",
@@ -263,7 +264,8 @@ class HLSProxyPagesMixin:
                 "extractors_cached": len(self.extractors),
                 "cdn_tokens": len(getattr(self, '_renewed_cdn_tokens', {})),
                 "proxy_sessions_cached": len(getattr(self, '_proxy_sessions', {})),
-                "active_stream_sessions": len(_shared.ACTIVE_STREAM_SESSIONS),
+                "active_stream_sessions": len(active_streams),
+                "active_stream_sessions_window_seconds": 30,
                 "bypassed_warp_domains": len(_shared.BYPASSED_WARP_DOMAINS),
                 "template_cache": len(getattr(self, '_template_cache', {})),
                 "dead_proxies": len(getattr(_config, 'DEAD_PROXIES', {})),
