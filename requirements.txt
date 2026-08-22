@@ -9,7 +9,6 @@ pycryptodome
 pydash2hls
 Pillow
 curl_cffi
-cloudscraper
 brotli
 psutil
 pywidevine
