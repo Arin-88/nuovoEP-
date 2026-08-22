@@ -53,6 +53,7 @@ class RecordingManager:
         self.start_times: Dict[str, float] = {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._monitor_tasks: Dict[str, asyncio.Task] = {}
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -587,9 +588,18 @@ class RecordingManager:
                 logger.error(f"Error in cleanup loop: {e}")
             await asyncio.sleep(3600)
 
+    def start_cleanup_loop(self):
+        """Start the maintenance loop once and retain it for clean shutdown."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self.cleanup_loop())
+
     async def shutdown(self):
         """Gracefully stop all recordings on shutdown."""
         logger.info("Shutting down RecordingManager...")
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            await asyncio.gather(self._cleanup_task, return_exceptions=True)
+        self._cleanup_task = None
         for recording_id in list(self.processes.keys()):
             await self.stop_recording(recording_id)
         for task in list(self._monitor_tasks.values()):

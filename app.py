@@ -129,8 +129,8 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        asyncio.create_task(proxy.start_tasks())
-        asyncio.create_task(recording_manager.cleanup_loop())
+        await proxy.start_tasks()
+        recording_manager.start_cleanup_loop()
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app):

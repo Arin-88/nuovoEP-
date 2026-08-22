@@ -128,56 +128,62 @@ class DoodStreamExtractor:
 
     async def _do_extract_with_proxy(self, embed_url: str, scraper_proxies: dict | None) -> dict | None:
         scraper = cloudscraper.create_scraper(delay=5)
-        if scraper_proxies:
-            self.last_used_proxy = scraper_proxies["https"]
-            logger.info(f"DoodStream: cloudscraper using proxy {scraper_proxies['https']}")
-        else:
-            self.last_used_proxy = None
-            logger.info("DoodStream: cloudscraper using direct connection")
+        try:
+            if scraper_proxies:
+                self.last_used_proxy = scraper_proxies["https"]
+                logger.info(f"DoodStream: cloudscraper using proxy {scraper_proxies['https']}")
+            else:
+                self.last_used_proxy = None
+                logger.info("DoodStream: cloudscraper using direct connection")
 
-        response = await asyncio.to_thread(
-            scraper.get,
-            embed_url,
-            headers={"User-Agent": _DOOD_UA},
-            timeout=30,
-            proxies=scraper_proxies,
-        )
-        if response.status_code != 200:
-            raise ExtractorError(f"DoodStream: cloudscraper failed to fetch embed page (status {response.status_code})")
-
-        html = response.text
-        title_match = re.search(r"<title>(.*?)</title>", html, re.I)
-        if title_match:
-            logger.info(f"DoodStream Page Title: {title_match.group(1)}")
-
-        if "Just a moment..." in html or "DDoS protection" in html or "cf-browser-verification" in html:
-            logger.warning("DoodStream: cloudscraper returned 200 but Cloudflare challenge is present.")
-
-        pass_path = self._extract_pass_path(html)
-        token = self._extract_token(html, pass_path)
-        if not (pass_path and token):
-            self._log_parse_debug(html)
-            return None
-
-        pass_url = urljoin(embed_url, pass_path)
-        logger.info(f"Cloudscraper found pass_md5 path: {pass_path}")
-
-        pass_response = await asyncio.to_thread(
-            scraper.get,
-            pass_url,
-            headers={"Referer": embed_url, "User-Agent": _DOOD_UA},
-            timeout=30,
-            proxies=scraper_proxies,
-        )
-        if pass_response.status_code != 200 or len(pass_response.text) <= 10:
-            logger.warning(
-                f"DoodStream: pass_md5 request failed with status {pass_response.status_code} "
-                f"and content: {pass_response.text[:100]}"
+            response = await asyncio.to_thread(
+                scraper.get,
+                embed_url,
+                headers={"User-Agent": _DOOD_UA},
+                timeout=30,
+                proxies=scraper_proxies,
             )
-            return None
+            if response.status_code != 200:
+                raise ExtractorError(f"DoodStream: cloudscraper failed to fetch embed page (status {response.status_code})")
 
-        logger.info("DoodStream: cloudscraper extraction successful!")
-        return self._finalize_extraction(pass_response.text.strip(), html, embed_url, _DOOD_UA)
+            html = response.text
+            title_match = re.search(r"<title>(.*?)</title>", html, re.I)
+            if title_match:
+                logger.info(f"DoodStream Page Title: {title_match.group(1)}")
+
+            if "Just a moment..." in html or "DDoS protection" in html or "cf-browser-verification" in html:
+                logger.warning("DoodStream: cloudscraper returned 200 but Cloudflare challenge is present.")
+
+            pass_path = self._extract_pass_path(html)
+            token = self._extract_token(html, pass_path)
+            if not (pass_path and token):
+                self._log_parse_debug(html)
+                return None
+
+            pass_url = urljoin(embed_url, pass_path)
+            logger.info(f"Cloudscraper found pass_md5 path: {pass_path}")
+
+            pass_response = await asyncio.to_thread(
+                scraper.get,
+                pass_url,
+                headers={"Referer": embed_url, "User-Agent": _DOOD_UA},
+                timeout=30,
+                proxies=scraper_proxies,
+            )
+            if pass_response.status_code != 200 or len(pass_response.text) <= 10:
+                logger.warning(
+                    f"DoodStream: pass_md5 request failed with status {pass_response.status_code} "
+                    f"and content: {pass_response.text[:100]}"
+                )
+                return None
+
+            logger.info("DoodStream: cloudscraper extraction successful!")
+            return self._finalize_extraction(pass_response.text.strip(), html, embed_url, _DOOD_UA)
+        finally:
+            try:
+                scraper.close()
+            except Exception as exc:
+                logger.debug("DoodStream: failed to close cloudscraper session: %s", exc)
 
     async def extract(self, url: str, **kwargs):
         parsed = urlparse(url)

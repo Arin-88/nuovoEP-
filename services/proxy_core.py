@@ -76,10 +76,14 @@ class HLSProxyCoreMixin:
 
     async def start_tasks(self):
         """Starts background tasks for the proxy."""
+        if any(not task.done() for task in self._background_tasks):
+            return
         self._last_warp_reconnect_time = time.time()  # ponytail: startup cooldown to allow initial handshake
-        asyncio.create_task(self._update_latest_version())
-        asyncio.create_task(self._cleanup_stale_sessions())
-        asyncio.create_task(self._warp_keepalive())
+        self._background_tasks = {
+            asyncio.create_task(self._update_latest_version()),
+            asyncio.create_task(self._cleanup_stale_sessions()),
+            asyncio.create_task(self._warp_keepalive()),
+        }
 
     async def _cleanup_stale_sessions(self):
         """Periodic cleanup of stale CDN tokens and idle proxy sessions to prevent memory accumulation when idle."""
@@ -796,6 +800,13 @@ class HLSProxyCoreMixin:
 
     async def cleanup(self):
         """Pulizia delle risorse"""
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
         try:
             if self.session and not self.session.closed:
                 await self.session.close()
@@ -813,6 +824,7 @@ class HLSProxyCoreMixin:
             for extractor in self.extractors.values():
                 if hasattr(extractor, "close"):
                     await extractor.close()
+            self.extractors.clear()
             self._extractor_atimes.clear()
             self._extractor_stream_atimes.clear()
         except Exception as e:
