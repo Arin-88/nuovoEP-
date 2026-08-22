@@ -14,10 +14,13 @@ logging.basicConfig(
 # Aggiungi path corrente per import moduli
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from services.proxy import HLSProxy
-from config import PORT, RECORDINGS_DIR, APP_VERSION
-from services.recording_manager import RecordingManager
-from routes.recordings import setup_recording_routes
+_IS_PROCESS_POOL_WORKER = __name__ == "__mp_main__"
+
+if not _IS_PROCESS_POOL_WORKER:
+    from services.proxy import HLSProxy
+    from config import PORT, RECORDINGS_DIR, APP_VERSION
+    from services.recording_manager import RecordingManager
+    from routes.recordings import setup_recording_routes
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +142,9 @@ def create_app():
     
     return app
 
-# Crea l'istanza "privata" dell'applicazione aiohttp.
-app = create_app()
+# I worker PoW di ProcessPoolExecutor su Windows importano il modulo principale
+# come __mp_main__. Non devono inizializzare server, registry e database.
+app = None if _IS_PROCESS_POOL_WORKER else create_app()
 
 def main():
     """Funzione principale per avviare il server."""

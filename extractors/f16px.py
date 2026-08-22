@@ -5,6 +5,7 @@ import uuid
 import time
 import asyncio
 import os
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from urllib.parse import urlparse
 
@@ -24,6 +25,12 @@ from utils import python_aesgcm
 # ──────────────────────────────────────────────────────────────────────
 _MASK = 0xFFFFFFFF
 _BE, _LT, _DR, _LR, _HR = 512, 511, 2, 2654435761, 2246822519
+_POW_STOP_EVENT = None
+
+
+def _init_pow_worker(stop_event):
+    global _POW_STOP_EVENT
+    _POW_STOP_EVENT = stop_event
 
 
 def _pow_hash(data: bytes):
@@ -101,11 +108,15 @@ def _solve_pow_worker(nonce: str, difficulty: int, start: int, step: int,
     prefix = nonce + ":"
     started = time.time()
     s = start
+    iterations = 0
 
     while time.time() - started < timeout:
+        if (iterations & 0x3F) == 0 and _POW_STOP_EVENT is not None and _POW_STOP_EVENT.is_set():
+            return None
         if _lz_bits(_pow_hash((prefix + str(s)).encode("latin-1"))) >= difficulty:
             return str(s)
         s += step
+        iterations += 1
 
     return None
 
@@ -115,16 +126,28 @@ def _solve_pow_parallel(nonce: str, difficulty: int, timeout: float = 60.0):
         return "0"
 
     workers = max(2, min(os.cpu_count() or 2, 4))
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(_solve_pow_worker, nonce, difficulty, i, workers, timeout)
-            for i in range(workers)
-        ]
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                executor.shutdown(cancel_futures=True)
-                return result
+    context = multiprocessing.get_context()
+    stop_event = context.Event()
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+            initializer=_init_pow_worker,
+            initargs=(stop_event,),
+        ) as executor:
+            futures = [
+                executor.submit(_solve_pow_worker, nonce, difficulty, i, workers, timeout)
+                for i in range(workers)
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    stop_event.set()
+                    for pending in futures:
+                        pending.cancel()
+                    return result
+    finally:
+        stop_event.set()
     return None
 
 
