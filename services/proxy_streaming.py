@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 import re
 import time
 import urllib.parse
@@ -339,13 +340,23 @@ class HLSProxyStreamingMixin:
                     if header in resp.headers:
                         response_headers[header] = resp.headers[header]
 
-                # Forza il content-type e aggiunge Content-Disposition per .ts
-                set_response_header(response_headers, "Content-Type", "video/mp2t")
+                # Preserve the container type for fMP4/DASH segments. Marking
+                # every segment as MPEG-TS makes VLC download .m4s data without
+                # being able to demux it. Keep attachment semantics for legacy TS.
+                segment_path = segment_name.split("?", 1)[0].lower()
+                segment_ext = os.path.splitext(segment_path)[1]
+                is_fmp4 = segment_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
                 set_response_header(
                     response_headers,
-                    "Content-Disposition",
-                    f'attachment; filename="{segment_name}"',
+                    "Content-Type",
+                    "application/mp4" if is_fmp4 else "video/mp2t",
                 )
+                if not is_fmp4:
+                    set_response_header(
+                        response_headers,
+                        "Content-Disposition",
+                        f'attachment; filename="{segment_name}"',
+                    )
                 set_response_header(
                     response_headers, "Access-Control-Allow-Origin", "*"
                 )
@@ -828,7 +839,13 @@ class HLSProxyStreamingMixin:
                 )
 
                 if is_direct_media_stream or is_segment_like:
-                    seg_content_type = "video/mp2t" if is_segment_like else content_type
+                    stream_ext = os.path.splitext(stream_url.split("?", 1)[0].lower())[1]
+                    is_fmp4_segment = stream_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
+                    seg_content_type = (
+                        "application/mp4"
+                        if is_segment_like and is_fmp4_segment
+                        else ("video/mp2t" if is_segment_like else content_type)
+                    )
                     response_headers = {
                         "Content-Type": seg_content_type,
                         "Access-Control-Allow-Origin": "*",

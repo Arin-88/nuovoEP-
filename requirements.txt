@@ -6,6 +6,7 @@ beautifulsoup4
 lxml
 python-socks
 pycryptodome
+PyNaCl
 pydash2hls
 Pillow
 curl_cffi

@@ -3,6 +3,7 @@ import urllib.parse
 from urllib.parse import urljoin
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,31 @@ class MPDToHLSConverter:
             'mpd': 'urn:mpeg:dash:schema:mpd:2011',
             'cenc': 'urn:mpeg:cenc:2013'
         }
+
+    @staticmethod
+    def _expand_segment_template(template: str, rep_id: str, bandwidth: str, number: int = None, timestamp: int = None) -> str:
+        """Expand DASH template identifiers, including zero-padded $Number%05d$."""
+        value = template.replace('$RepresentationID$', str(rep_id))
+        value = value.replace('$Bandwidth$', str(bandwidth))
+        if number is not None:
+            value = re.sub(
+                r'\$Number%0(\d+)d\$',
+                lambda match: str(number).zfill(int(match.group(1))),
+                value,
+            )
+            value = value.replace('$Number$', str(number))
+        if timestamp is not None:
+            value = value.replace('$Time$', str(timestamp))
+        return value
+
+    @staticmethod
+    def _hls_codec(codec: str) -> str:
+        """Normalize DASH codec names for HLS/fMP4 player selection."""
+        if not codec:
+            return codec
+        # HLS clients (notably VLC) commonly advertise HEVC as hvc1,
+        # while DASH manifests use the equivalent hev1 sample entry.
+        return re.sub(r"^hev1(?=\.|$)", "hvc1", codec)
     
     def _extract_header_params(self, params: str) -> str:
         """Estrae solo i parametri necessari dalla query string originale.
@@ -90,7 +116,7 @@ class MPDToHLSConverter:
 
             audio_codecs_list = []
             for _, representation in audio_reps:
-                acodec = representation.get('codecs')
+                acodec = self._hls_codec(representation.get('codecs'))
                 if acodec and acodec not in audio_codecs_list:
                     audio_codecs_list.append(acodec)
 
@@ -150,7 +176,7 @@ class MPDToHLSConverter:
                     width = representation.get('width')
                     height = representation.get('height')
                     frame_rate = representation.get('frameRate')
-                    codecs = representation.get('codecs')
+                    codecs = self._hls_codec(representation.get('codecs'))
                     
                     encoded_url = urllib.parse.quote(original_url, safe='')
                     header_params = self._extract_header_params(params)
@@ -216,7 +242,10 @@ class MPDToHLSConverter:
             if is_live:
                 lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
             else:
-                lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:10', '#EXT-X-PLAYLIST-TYPE:VOD']
+                # Target duration is emitted once below from the actual segment
+                # durations.  A duplicate tag makes some HLS.js versions treat
+                # this VOD playlist as invalid/live and reload it forever.
+                lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-PLAYLIST-TYPE:VOD']
             
             # --- GESTIONE DRM (ClearKey) ---
             # Decrittazione lato server con mp4decrypt
@@ -321,8 +350,9 @@ class MPDToHLSConverter:
                 
                 if initialization:
                     # Processing initialization segment
-                    init_url = initialization.replace('$RepresentationID$', str(rep_id))
-                    init_url = init_url.replace('$Bandwidth$', str(bandwidth))
+                    init_url = self._expand_segment_template(
+                        initialization, rep_id, bandwidth
+                    )
                     full_init_url = urljoin(base_url, init_url)
                     encoded_init_url = urllib.parse.quote(full_init_url, safe='')
                     
@@ -473,10 +503,13 @@ class MPDToHLSConverter:
                     
                     for seg in segments_to_use:
                         # Costruisci URL segmento
-                        seg_name = media.replace('$RepresentationID$', str(rep_id))
-                        seg_name = seg_name.replace('$Bandwidth$', str(bandwidth))
-                        seg_name = seg_name.replace('$Number$', str(seg['number']))
-                        seg_name = seg_name.replace('$Time$', str(seg['time']))
+                        seg_name = self._expand_segment_template(
+                            media,
+                            rep_id,
+                            bandwidth,
+                            number=seg['number'],
+                            timestamp=seg['time'],
+                        )
                         
                         full_seg_url = urljoin(base_url, seg_name)
                         encoded_seg_url = urllib.parse.quote(full_seg_url, safe='')
@@ -524,10 +557,13 @@ class MPDToHLSConverter:
 
                     for i in range(total_segments):
                         seg_num = start_number + i
-                        seg_name = media.replace('$RepresentationID$', str(rep_id))
-                        seg_name = seg_name.replace('$Bandwidth$', str(bandwidth))
-                        seg_name = seg_name.replace('$Number$', str(seg_num))
-                        seg_name = seg_name.replace('$Time$', str(seg_num))
+                        seg_name = self._expand_segment_template(
+                            media,
+                            rep_id,
+                            bandwidth,
+                            number=seg_num,
+                            timestamp=seg_num,
+                        )
 
                         full_seg_url = urljoin(base_url, seg_name)
                         encoded_seg_url = urllib.parse.quote(full_seg_url, safe='')

@@ -118,6 +118,7 @@ class HLSProxyExtractorHandlerMixin:
                         "dropload",
                         "uqload",
                         "vidmoly",
+                        "vidlink",
                         "vidoza",
                         "turbovidplay",
                         "livetv",

@@ -702,6 +702,7 @@
                             <option value="sports99">Sports99 / CDNLiveTV</option>
                             <option value="embedst">EmbedSports / Streamed</option>
                             <option value="vidsonic">VidSonic</option>
+                            <option value="vidlink">VidLink (Movies / TV)</option>
                             <option value="mediaset">Mediaset Infinity</option>
                             <option value="wittytv">WittyTV</option>
                             <option value="raiplay">RaiPlay</option>
@@ -1139,10 +1140,14 @@
                         if (data.fatal) {
                             switch(data.type) {
                                 case Hls.ErrorTypes.NETWORK_ERROR:
-                                    hlsPlayer.startLoad();
+                                    showPlayerError("Network Error", "The stream relay returned an error (" + data.details + ").");
+                                    hlsPlayer.destroy();
+                                    hlsPlayer = null;
                                     break;
                                 case Hls.ErrorTypes.MEDIA_ERROR:
-                                    hlsPlayer.recoverMediaError();
+                                    showPlayerError("Codec/Media Error", "The browser cannot decode this stream (" + data.details + "). Try VLC or a browser with HEVC support.");
+                                    hlsPlayer.destroy();
+                                    hlsPlayer = null;
                                     break;
                                 default:
                                     showPlayerError("Playback Error", "Fatal network or media processing error: " + data.details);
