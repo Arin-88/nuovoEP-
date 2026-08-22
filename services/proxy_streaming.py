@@ -332,6 +332,7 @@ class HLSProxyStreamingMixin:
 
                 for header in [
                     "content-type",
+                    "content-length",
                     "content-range",
                     "accept-ranges",
                     "last-modified",
@@ -349,7 +350,7 @@ class HLSProxyStreamingMixin:
                 set_response_header(
                     response_headers,
                     "Content-Type",
-                    "application/mp4" if is_fmp4 else "video/mp2t",
+                    "video/mp4" if is_fmp4 else "video/mp2t",
                 )
                 if not is_fmp4:
                     set_response_header(
@@ -842,7 +843,7 @@ class HLSProxyStreamingMixin:
                     stream_ext = os.path.splitext(stream_url.split("?", 1)[0].lower())[1]
                     is_fmp4_segment = stream_ext in {".m4s", ".mp4", ".m4a", ".m4v", ".m4i"}
                     seg_content_type = (
-                        "application/mp4"
+                        "video/mp4"
                         if is_segment_like and is_fmp4_segment
                         else ("video/mp2t" if is_segment_like else content_type)
                     )
