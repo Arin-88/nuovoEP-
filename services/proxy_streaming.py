@@ -35,6 +35,7 @@ from services.proxy_shared import (
     should_use_curl_cffi,
     is_special_cdn_stream,
     ProxyDeadRetryError,
+    get_public_base_url,
 )
 
 class _ParallelFallback(Exception):
@@ -926,13 +927,7 @@ class HLSProxyStreamingMixin:
 
                 if manifest_content:
                     logger.info(f"📄 HLS manifest detected: {stream_url}")
-                    cf_visitor = request.headers.get("CF-Visitor", "")
-                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
-                        scheme = "https"
-                    else:
-                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                    host = request.headers.get("X-Forwarded-Host", request.host)
-                    proxy_base = f"{scheme}://{host}"
+                    proxy_base = get_public_base_url(request)
                     original_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
                     use_short_hls_urls = should_use_short_manifest_urls(
                         original_url,
@@ -971,13 +966,7 @@ class HLSProxyStreamingMixin:
                     manifest_content = content_bytes.decode("utf-8", errors='replace')
 
                     # ✅ CORREZIONE: Rileva lo schema e l'host corretti quando dietro un reverse proxy
-                    cf_visitor = request.headers.get("CF-Visitor", "")
-                    if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
-                        scheme = "https"
-                    else:
-                        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                    host = request.headers.get("X-Forwarded-Host", request.host)
-                    proxy_base = f"{scheme}://{host}"
+                    proxy_base = get_public_base_url(request)
 
                     # Recupera parametri
                     clearkey_param = parse_clearkey_params(request)
