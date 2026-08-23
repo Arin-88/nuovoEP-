@@ -151,8 +151,7 @@ class SyncEngine:
     async def _download(self, url: str, path: Path, headers: dict):
         await self._get(url, headers, destination=path, max_bytes=self.MAX_MEDIA_BYTES)
 
-    @staticmethod
-    def _sample_entries(entries, position: float):
+    def _sample_entries(self, entries, position: float):
         target = next((i for i, item in enumerate(entries)
                        if item["start"] <= position < item["start"] + item["duration"]),
                       len(entries) - 1)
