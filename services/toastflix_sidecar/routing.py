@@ -1,0 +1,133 @@
+"""Resolve sidecar outbound routing with EasyProxy's live configuration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from collections.abc import Mapping
+import time
+from urllib.parse import unquote
+
+import config_store
+import config as config_module
+from config import (
+    BYPASS_PROXIES_CONTEXT,
+    BYPASS_WARP_CONTEXT,
+    SELECTED_PROXY_CONTEXT,
+    STRICT_PROXY_CONTEXT,
+    get_extractor_proxies,
+    get_proxy_for_url,
+)
+
+
+_CONFIG_REFRESH_SECONDS = 1.0
+_last_config_refresh = 0.0
+
+
+def _refresh_live_config() -> None:
+    """Refresh admin settings in the long-lived sidecar process."""
+    global _last_config_refresh
+    now = time.monotonic()
+    if now - _last_config_refresh < _CONFIG_REFRESH_SECONDS:
+        return
+    config_store._load()
+    config_module.reload_config()
+    _last_config_refresh = now
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "off"}
+
+
+@dataclass(frozen=True)
+class RoutingOptions:
+    """Per-playback routing overrides; global admin config remains the default."""
+
+    warp_off: bool = False
+    proxy_off: bool = False
+    forced_proxy: str | None = None
+    extractor_name: str = ""
+
+    def proxy_for(self, url: str) -> str | None:
+        if self.forced_proxy:
+            return self.forced_proxy
+        _refresh_live_config()
+        bypass_warp = self.warp_off
+        bypass_proxies = self.proxy_off
+        if self.extractor_name:
+            extractor_key = self.extractor_name.lower().replace("_direct", "").replace("_noproxy", "")
+            warp_off_extractors = {
+                str(value).lower() for value in config_store.get("warp_off_extractors", [])
+            }
+            proxy_off_extractors = {
+                str(value).lower() for value in config_store.get("proxy_off_extractors", [])
+            }
+            if extractor_key in warp_off_extractors or extractor_key == "embedst":
+                bypass_warp = True
+            if extractor_key in proxy_off_extractors:
+                bypass_proxies = True
+
+        bypass_warp_token = BYPASS_WARP_CONTEXT.set(bypass_warp)
+        bypass_proxy_token = BYPASS_PROXIES_CONTEXT.set(bypass_proxies)
+        selected_token = SELECTED_PROXY_CONTEXT.set(None)
+        strict_token = STRICT_PROXY_CONTEXT.set(False)
+        try:
+            if self.extractor_name and not bypass_proxies:
+                extractor_proxies = get_extractor_proxies(self.extractor_name)
+                if extractor_proxies:
+                    return extractor_proxies[0]
+            return get_proxy_for_url(
+                url,
+                bypass_warp=bypass_warp,
+                bypass_proxies=bypass_proxies,
+            )
+        finally:
+            BYPASS_WARP_CONTEXT.reset(bypass_warp_token)
+            BYPASS_PROXIES_CONTEXT.reset(bypass_proxy_token)
+            SELECTED_PROXY_CONTEXT.reset(selected_token)
+            STRICT_PROXY_CONTEXT.reset(strict_token)
+
+
+def from_values(*sources: Mapping | None) -> RoutingOptions:
+    """Read routing flags from request/query/payload dictionaries."""
+    values: dict = {}
+    for source in sources:
+        if isinstance(source, Mapping):
+            values.update(source)
+
+    raw_proxy = values.get("proxy") or values.get("proxy_url") or ""
+    raw_proxy = unquote(str(raw_proxy).strip())
+    proxy_off = (
+        str(raw_proxy).lower() == "off"
+        or _as_bool(values.get("proxy_off"))
+    )
+    forced_proxy = None if proxy_off or not raw_proxy else raw_proxy
+    extractor_name = str(
+        values.get("extractor_name")
+        or values.get("extractor")
+        or values.get("extractor_key")
+        or ""
+    ).strip()
+    warp_off = (
+        str(values.get("warp") or "").strip().lower() == "off"
+        or _as_bool(values.get("warp_off"))
+    )
+    return RoutingOptions(
+        warp_off=warp_off,
+        proxy_off=proxy_off,
+        forced_proxy=forced_proxy,
+        extractor_name=extractor_name,
+    )
+
+
+def as_payload(options: RoutingOptions) -> dict:
+    return {
+        "warp_off": options.warp_off,
+        "proxy_off": options.proxy_off,
+        "proxy_url": options.forced_proxy or "",
+        "extractor_name": options.extractor_name,
+    }
+
+
+__all__ = ["RoutingOptions", "as_payload", "from_values"]
