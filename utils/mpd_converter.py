@@ -237,6 +237,16 @@ class MPDToHLSConverter:
                 logger.error(f"❌ Representation {rep_id} not found in manifest.")
                 return "#EXTM3U\n#EXT-X-ERROR: Representation not found"
 
+            # Keep the track kind on generated segment requests.  DASH commonly
+            # uses `.m4s` for both audio and video; iOS uses the response MIME to
+            # attach the fMP4 stream to the correct rendition.
+            adaptation_kind = (
+                adaptation_set.get('contentType', '')
+                or adaptation_set.get('mimeType', '')
+                or representation.get('mimeType', '')
+            ).lower()
+            media_type_param = '&media_type=audio' if 'audio' in adaptation_kind else ''
+
             # fMP4 richiede HLS versione 6 o 7, ma per .ts output usiamo v3 per compatibilità
             # Per LIVE: non usare VOD e non aggiungere ENDLIST
             if is_live:
@@ -334,6 +344,7 @@ class MPDToHLSConverter:
             
             if segment_template is not None:
                 timescale = int(segment_template.get('timescale', '1'))
+                presentation_time_offset = int(segment_template.get('presentationTimeOffset', '0'))
                 initialization = segment_template.get('initialization')
                 media = segment_template.get('media')
                 start_number = int(segment_template.get('startNumber', '1'))
@@ -358,9 +369,9 @@ class MPDToHLSConverter:
                     
                     header_params = self._extract_header_params(params)
                     if server_side_decryption:
-                        proxy_init_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_init_url}&is_init=1{decryption_params}{header_params}"
+                        proxy_init_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_init_url}&is_init=1{decryption_params}{media_type_param}{header_params}"
                     else:
-                        proxy_init_url = f"{proxy_base}/segment/init.mp4?base_url={encoded_init_url}{header_params}"
+                        proxy_init_url = f"{proxy_base}/segment/init.mp4?base_url={encoded_init_url}{media_type_param}{header_params}"
                     lines.append(f'#EXT-X-MAP:URI="{proxy_init_url}"')
                     lines[1] = '#EXT-X-VERSION:6'
 
@@ -467,7 +478,11 @@ class MPDToHLSConverter:
                         if not segments_to_use:
                             segments_to_use = [all_segments[-1]]
 
-                        logger.debug(f"📐 [Window] rep={rep_id} edge={global_last_time_sec:.1f} first={global_first_time_sec:.1f} win={window_start_sec:.1f} segs={len(segments_to_use)} start_ts={segments_to_use[0]['time']/timescale:.1f} seq={int(round(segments_to_use[0]['time']/timescale/2.0))}")
+                        first_window_seg = segments_to_use[0]
+                        sequence_duration_units = max(1, int(first_window_seg['d']))
+                        sequence_time = first_window_seg['time'] - presentation_time_offset
+                        sequence_preview = int(round(sequence_time / sequence_duration_units))
+                        logger.debug(f"📐 [Window] rep={rep_id} edge={global_last_time_sec:.1f} first={global_first_time_sec:.1f} win={window_start_sec:.1f} segs={len(segments_to_use)} start_ts={segments_to_use[0]['time']/timescale:.1f} seq={sequence_preview}")
 
                         total_duration = sum(seg['duration'] for seg in segments_to_use)
                         
@@ -485,7 +500,13 @@ class MPDToHLSConverter:
                         if len(segments_to_use) > 0:
                             first_seg = segments_to_use[0]
                             first_seg_time_sec = first_seg['time'] / timescale
-                            media_sequence = int(round(first_seg_time_sec / 2.0))
+                            # DASH live manifests may reset startNumber to 1
+                            # on every rolling window.  Build a stable HLS
+                            # sequence from media time and the actual segment
+                            # duration (the log shows 1.6 s, not 2 s).
+                            duration_units = max(1, int(first_seg['d']))
+                            media_time = first_seg['time'] - presentation_time_offset
+                            media_sequence = int(round(media_time / duration_units))
                             
                             lines.append(f'#EXT-X-TARGETDURATION:{int(max_duration) + 1}')
                             lines.append(f'#EXT-X-MEDIA-SEQUENCE:{media_sequence}')
@@ -524,10 +545,10 @@ class MPDToHLSConverter:
                         header_params = self._extract_header_params(params)
                         
                         if server_side_decryption:
-                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{header_params}"
+                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{media_type_param}{header_params}"
                             lines.append(decrypt_url)
                         else:
-                            proxy_seg_url = f"{proxy_base}/segment/{seg_filename}?base_url={encoded_seg_url}{header_params}"
+                            proxy_seg_url = f"{proxy_base}/segment/{seg_filename}?base_url={encoded_seg_url}{media_type_param}{header_params}"
                             lines.append(proxy_seg_url)
                 
                 # --- SEGMENT TEMPLATE (DURATION) ---
@@ -570,10 +591,10 @@ class MPDToHLSConverter:
                         header_params = self._extract_header_params(params)
                         orig_ext = os.path.splitext(seg_name.split('?')[0])[1] or '.m4s'
                         if server_side_decryption:
-                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{header_params}"
+                            decrypt_url = f"{proxy_base}/decrypt/segment.{ext_param}?url={encoded_seg_url}&init_url={encoded_init_url}&skip_init=1{decryption_params}{media_type_param}{header_params}"
                             seg_url = decrypt_url
                         else:
-                            seg_url = f"{proxy_base}/segment/seg_{seg_num}{orig_ext}?base_url={encoded_seg_url}{header_params}"
+                            seg_url = f"{proxy_base}/segment/seg_{seg_num}{orig_ext}?base_url={encoded_seg_url}{media_type_param}{header_params}"
 
                         lines.append(f'#EXTINF:{duration_sec:.6f},')
                         lines.append(seg_url)
