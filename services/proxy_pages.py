@@ -46,8 +46,12 @@ class HLSProxyPagesMixin:
                     text="No valid playlist definition found", status=400
                 )
 
-            # ✅ CORREZIONE: Rileva lo schema e l'host corretti quando dietro un reverse proxy
-            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+            # ✅ CORREZIONE: Rileva lo schema pubblico corretto anche dietro Cloudflare
+            cf_visitor = request.headers.get("CF-Visitor", "").lower()
+            if '"scheme"' in cf_visitor and "https" in cf_visitor:
+                scheme = "https"
+            else:
+                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
             host = request.headers.get("X-Forwarded-Host", request.host)
             base_url = f"{scheme}://{host}"
 
