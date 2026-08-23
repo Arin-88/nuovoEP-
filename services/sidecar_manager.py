@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import aiohttp
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,55 @@ class SidecarManager:
             path = f"/{path}"
         target = f"{self.base_url}{path}"
         return f"{target}?{query_string}" if query_string else target
+
+    def memory_stats(self) -> dict:
+        """Return RSS for the sidecar and any processes it spawned."""
+        process = self.process
+        if process is None or process.returncode is not None:
+            return {
+                "status": "stopped",
+                "pid": None,
+                "rss_bytes": 0,
+                "rss_mb": 0.0,
+                "processes": [],
+            }
+
+        try:
+            root = psutil.Process(process.pid)
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return {
+                "status": "stopped",
+                "pid": None,
+                "rss_bytes": 0,
+                "rss_mb": 0.0,
+                "processes": [],
+            }
+
+        details = []
+        for item in processes:
+            try:
+                rss_bytes = item.memory_info().rss
+                details.append({
+                    "pid": item.pid,
+                    "name": item.name(),
+                    "role": "sidecar" if item.pid == root.pid else "child",
+                    "rss_bytes": rss_bytes,
+                    "rss_mb": round(rss_bytes / (1024 * 1024), 2),
+                })
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                continue
+
+        details.sort(key=lambda item: item["rss_bytes"], reverse=True)
+        rss_bytes = sum(item["rss_bytes"] for item in details)
+        return {
+            "status": "running",
+            "pid": root.pid,
+            "rss_bytes": rss_bytes,
+            "rss_mb": round(rss_bytes / (1024 * 1024), 2),
+            "process_count": len(details),
+            "processes": details,
+        }
 
     async def start(self) -> None:
         """Launch the sidecar and wait until its health endpoint responds."""

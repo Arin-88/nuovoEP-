@@ -108,6 +108,7 @@ def create_app():
     app.router.add_get('/proxy/ip', proxy.handle_proxy_ip)
     # ✅ Health check endpoint
     app.router.add_get('/health', lambda r: web.json_response({"status": "ok", "version": APP_VERSION}))
+    app.router.add_get('/api/sidecar/memory', proxy.handle_sidecar_memory)
 
     # Toastflix aiohttp sidecar, kept private and exposed through this process.
     app.router.add_route('*', '/sidecar', proxy.handle_sidecar_request)

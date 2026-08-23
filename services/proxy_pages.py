@@ -306,6 +306,7 @@ class HLSProxyPagesMixin:
                 "/license": "Proxy licenze DRM (ClearKey/Widevine) - ?url=<URL> o ?clearkey=<id:key>",
                 "/info": "Pagina HTML con informazioni sul server",
                 "/api/info": "Endpoint JSON con informazioni sul server",
+                "/api/sidecar/memory": "RAM del sidecar Toastflix e dei suoi processi figli",
             },
             "usage_examples": {
                 "proxy_hls": "/proxy/hls/manifest.m3u8?d=https://example.com/stream.m3u8",
@@ -357,6 +358,16 @@ class HLSProxyPagesMixin:
                         "summary": "Server information",
                         "description": "Returns server status, loaded extractors, modules, and example endpoints.",
                         "responses": {"200": {"description": "Server information JSON"}},
+                    }
+                },
+                "/api/sidecar/memory": {
+                    "get": {
+                        "summary": "Sidecar memory usage",
+                        "description": "Returns RSS used by the Toastflix sidecar and any child processes it spawned, such as FFmpeg.",
+                        "responses": {
+                            "200": {"description": "Sidecar memory usage JSON"},
+                            "503": {"description": "Sidecar support is unavailable"},
+                        },
                     }
                 },
                 "/health": {

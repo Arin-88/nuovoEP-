@@ -146,6 +146,16 @@ class HLSProxySidecarMixin:
         """Handle Toastflix clients configured with EasyProxy's base URL."""
         return await self._proxy_sidecar_request(request, "")
 
+    async def handle_sidecar_memory(self, request: web.Request) -> web.Response:
+        """Return RAM used only by the sidecar and its child processes."""
+        manager = getattr(self, "sidecar_manager", None)
+        if manager is None:
+            return web.json_response(
+                {"status": "unavailable", "detail": "Toastflix sidecar is not configured"},
+                status=503,
+            )
+        return web.json_response(manager.memory_stats())
+
     async def cleanup(self):
         session = getattr(self, "_sidecar_session", None)
         if session is not None and not session.closed:
