@@ -25,6 +25,7 @@ from services.proxy_shared import (
     get_proxy_for_url,
     is_expired_embed_error,
     extractor_name_for_log,
+    get_public_base_url,
 )
 
 
@@ -203,9 +204,7 @@ class HLSProxyManifestHandlerMixin:
 
             # --- DASH NATIVO: Riscrive il manifest per segmenti proxati (senza conversione) ---
             if is_native_mpd:
-                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                host = request.headers.get("X-Forwarded-Host", request.host)
-                proxy_base = f"{scheme}://{host}"
+                proxy_base = get_public_base_url(request)
 
                 # Fetch original manifest if not already captured
                 if not captured_manifest:
@@ -250,9 +249,7 @@ class HLSProxyManifestHandlerMixin:
             # Se redirect_stream è False, restituisci il JSON con i dettagli (stile MediaFlow)
             if not redirect_stream:
                 # Costruisci l'URL base del proxy
-                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                host = request.headers.get("X-Forwarded-Host", request.host)
-                proxy_base = f"{scheme}://{host}"
+                proxy_base = get_public_base_url(request)
 
                 mediaflow_endpoint = (
                     result.get("mediaflow_endpoint", "hls_proxy")
@@ -292,9 +289,7 @@ class HLSProxyManifestHandlerMixin:
                 return web.json_response(response_data)
 
             if captured_manifest and request.path.endswith("manifest.m3u8"):
-                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-                host = request.headers.get("X-Forwarded-Host", request.host)
-                proxy_base = f"{scheme}://{host}"
+                proxy_base = get_public_base_url(request)
                 original_channel_url = request.query.get("orig_url") or request.query.get("url") or request.query.get("d", "")
                 api_password = request.query.get("api_password")
                 no_bypass = request.query.get("no_bypass") == "1"
@@ -459,11 +454,7 @@ class HLSProxyManifestHandlerMixin:
                      return web.Response(text="Failed to fetch MPD manifest after all attempts", status=502)
 
                 # Build proxy base URL
-                scheme = request.headers.get(
-                    "X-Forwarded-Proto", request.scheme
-                )
-                host = request.headers.get("X-Forwarded-Host", request.host)
-                proxy_base = f"{scheme}://{host}"
+                proxy_base = get_public_base_url(request)
 
                 # Build params string with headers
                 params = "".join(

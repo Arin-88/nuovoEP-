@@ -98,6 +98,20 @@ _STDLIB_MODULES = {
 class ProxyDeadRetryError(Exception):
     """Raised when the proxy dies during playlist fetch; triggers re-extraction."""
 
+def get_public_base_url(request):
+    """Build the public origin, preserving HTTPS behind reverse proxies."""
+    cf_visitor = request.headers.get("CF-Visitor", "").lower()
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    scheme = forwarded_proto.split(",", 1)[0].strip().lower() or request.scheme
+    if '"scheme"' in cf_visitor and "https" in cf_visitor:
+        scheme = "https"
+    if scheme not in {"http", "https"}:
+        scheme = request.scheme
+
+    forwarded_host = request.headers.get("X-Forwarded-Host", "")
+    host = forwarded_host.split(",", 1)[0].strip() or request.host
+    return f"{scheme}://{host}"
+
 def hex_to_b64url(hex_str: str) -> str:
     return (
         base64.urlsafe_b64encode(binascii.unhexlify(hex_str))

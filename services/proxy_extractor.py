@@ -9,6 +9,7 @@ from services.proxy_shared import (
     STRICT_PROXY_CONTEXT,
     check_vavoo_request,
     ManifestRewriter,
+    get_public_base_url,
 )
 import config_store
 import asyncio
@@ -128,10 +129,10 @@ class HLSProxyExtractorHandlerMixin:
                         "raiplay",
                     ],
                     "examples": [
-                        f"{request.scheme}://{request.host}/extractor/video?d=https://vavoo.to/channel/123",
-                        f"{request.scheme}://{request.host}/extractor/video.m3u8?host=vavoo&d=https://custom-link.com",
-                        f"{request.scheme}://{request.host}/extractor/video.mp4?host=mixdrop&d=https://mixdrop.co/e/ABC123XYZ",
-                        f"{request.scheme}://{request.host}/extractor/video?d=BASE64_STRING",
+                        f"{get_public_base_url(request)}/extractor/video?d=https://vavoo.to/channel/123",
+                        f"{get_public_base_url(request)}/extractor/video.m3u8?host=vavoo&d=https://custom-link.com",
+                        f"{get_public_base_url(request)}/extractor/video.mp4?host=mixdrop&d=https://mixdrop.co/e/ABC123XYZ",
+                        f"{get_public_base_url(request)}/extractor/video?d=BASE64_STRING",
                     ],
                 }
                 return web.json_response(help_response)
@@ -268,13 +269,7 @@ class HLSProxyExtractorHandlerMixin:
             )
 
             # Costruisci l'URL del proxy per questo stream
-            cf_visitor = request.headers.get("CF-Visitor", "")
-            if '"scheme"' in cf_visitor and "https" in cf_visitor.lower():
-                scheme = "https"
-            else:
-                scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-            host = request.headers.get("X-Forwarded-Host", request.host)
-            proxy_base = f"{scheme}://{host}"
+            proxy_base = get_public_base_url(request)
 
             # Determina l'endpoint corretto
             endpoint = "/proxy/hls/manifest.m3u8"
