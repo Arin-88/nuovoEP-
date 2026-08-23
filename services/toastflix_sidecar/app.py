@@ -50,7 +50,7 @@ _configure_cache(DEFAULT_CACHE_DIR)
 
 
 class SidecarError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str | dict):
         super().__init__(detail)
         self.status = status
         self.detail = detail
@@ -260,8 +260,16 @@ async def sync_audio(request: web.Request) -> web.Response:
     body["_routing"] = as_payload(from_values(request.query, body))
     try:
         result = await sync_engine.measure(body)
-    except (ValueError, FileNotFoundError, RuntimeError) as exc:
-        raise SidecarError(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise SidecarError(410, {
+            "code": "AUDIO_SESSION_EXPIRED",
+            "message": str(exc) or "audio session expired",
+        }) from exc
+    except (ValueError, RuntimeError) as exc:
+        message = str(exc) or "audio sync failed"
+        lowered = message.lower()
+        code = "SYNC_BUSY" if "busy" in lowered else "SYNC_NETWORK"
+        raise SidecarError(422, {"code": code, "message": message}) from exc
     await offsets.report(body, result)
     return _json(result)
 
@@ -323,6 +331,11 @@ app.router.add_get(r"/dual/aud/{hid}/s{idx:\d+}.m4s", audio_segment)
 app.router.add_post("/offset/lookup", offset_lookup)
 app.router.add_post("/offset/report", offset_report)
 app.router.add_post("/sync", sync_audio)
+# Keep the canonical Toastflix namespace working when EasyProxy forwards the
+# complete /dual/* path to the sidecar.
+app.router.add_post("/dual/offset/lookup", offset_lookup)
+app.router.add_post("/dual/offset/report", offset_report)
+app.router.add_post("/dual/sync", sync_audio)
 
 
 def main() -> None:
