@@ -75,6 +75,7 @@ class HLSProxy(
 
         # Prefetch queue for background downloading (kept for prefetch logic, no segment cache storage)
         self.prefetch_tasks = set()
+        self._background_tasks = set()
         self._prefetch_semaphore = asyncio.Semaphore(5)
         self._prefetch_lock = asyncio.Lock()
 
