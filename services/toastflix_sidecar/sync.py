@@ -344,12 +344,18 @@ class SyncEngine:
         payload["cache_key"] = cache_key
         lookup = await self.offsets.lookup({"cache_key": cache_key, "media_key": media_key, "resolution": resolution, "video_fingerprint": video_fp, "audio_fingerprint": audio_fp, "vpsAccess": payload.get("vpsAccess", "")})
         if lookup:
-            result = {"status": "ok", "cached": True, **(lookup.get("details") or lookup)}
-            if reference_audio_url and not result.get("video_start_time"):
-                lookup = None
-            else:
+            cached_details = lookup.get("details") or lookup
+            cached_status = str(cached_details.get("status") or lookup.get("status") or "")
+            # Negative sync results are not authoritative: a low-quality sample,
+            # a temporary CDN failure, or a provider edition change can produce
+            # them. Re-measure instead of returning a permanent 409.
+            if cached_status == "ok" and not (
+                reference_audio_url and not cached_details.get("video_start_time")
+            ):
+                result = {"status": "ok", "cached": True, **cached_details}
                 result["cache_key"] = cache_key
                 return result
+            lookup = None
         video_entries, _ = await self._video_entries(video_url, video_headers)
         video_duration = sum(item["duration"] for item in video_entries)
         video_start_time = 0.0
@@ -392,7 +398,10 @@ class SyncEngine:
                     raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
                 lag, correlation = self._lag(self._envelope(video_pcm), self._envelope(audio_pcm))
                 measurements.append({"position": position, "lag": lag, "offset": lag, "correlation": correlation})
-        valid = [item for item in measurements if item["correlation"] >= .75]
+        # Two consistent samples are enough when the third sample is a failed
+        # or low-correlation decode. The offset deviation check below remains
+        # strict, so unrelated editions still stay incompatible.
+        valid = [item for item in measurements if item["correlation"] >= .70]
         if len(valid) < 2:
             result = {"status": "incompatible", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
         else:
