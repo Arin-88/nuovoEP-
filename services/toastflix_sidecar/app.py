@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -30,6 +31,7 @@ DOCKER_CACHE_DIR = Path("/data/recordings/sidecar_data")
 DEFAULT_CACHE_DIR = DOCKER_CACHE_DIR if Path("/data").is_dir() else APP_DIR / "data"
 SESSION_TTL = 21600
 BACKGROUND_CLEANUP_INTERVAL = 5
+API_PASSWORD = os.environ.get("API_PASSWORD", "").strip()
 
 sessions = SessionManager(SESSION_TTL)
 audio = None
@@ -95,8 +97,24 @@ def _base_url(request: web.Request) -> str:
 
 
 def _audio_url(request: web.Request, hid: str, token: str, offset: float = 0.0, rate: float = 1.0) -> str:
-    query = urlencode({"o": int(round(offset * 1000)), "r": int(round(rate * 1_000_000_000)), "t": token})
+    values = {
+        "o": int(round(offset * 1000)),
+        "r": int(round(rate * 1_000_000_000)),
+        "t": token,
+    }
+    api_password = request.query.get("api_password") or API_PASSWORD
+    if api_password:
+        values["api_password"] = api_password
+    query = urlencode(values)
     return f"{_base_url(request)}/dual/aud/{hid}/audio.m3u8?{query}"
+
+
+def _audio_query(request: web.Request, offset_ms: int, rate_nano: int, token: str) -> str:
+    values = {"o": offset_ms, "r": rate_nano, "t": token}
+    api_password = request.query.get("api_password") or API_PASSWORD
+    if api_password:
+        values["api_password"] = api_password
+    return urlencode(values)
 
 
 def _audio_response(data: bytes, media_type: str, cache_control: str = "no-store") -> web.Response:
@@ -184,10 +202,10 @@ async def audio_playlist(request: web.Request) -> web.Response:
             "#EXT-X-PLAYLIST-TYPE:VOD",
             f"#EXT-X-TARGETDURATION:{int(max(item['duration'] for item in timeline)) + 1}",
             "#EXT-X-MEDIA-SEQUENCE:0",
-            f'#EXT-X-MAP:URI="{base}/dual/aud/{hid}/init.mp4?{urlencode({"o": offset_ms, "r": rate_nano, "t": token})}"',
+            f'#EXT-X-MAP:URI="{base}/dual/aud/{hid}/init.mp4?{_audio_query(request, offset_ms, rate_nano, token)}"',
         ]
         for item in timeline:
-            query = urlencode({"o": offset_ms, "r": rate_nano, "t": token})
+            query = _audio_query(request, offset_ms, rate_nano, token)
             lines += [
                 f"#EXTINF:{item['duration']:.6f},",
                 f"{base}/dual/aud/{hid}/s{item['idx']}.m4s?{query}",

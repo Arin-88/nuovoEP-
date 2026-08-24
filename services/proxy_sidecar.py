@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import aiohttp
 from aiohttp import web
 
+from config import check_password
+
 if TYPE_CHECKING:
     from services.sidecar_manager import SidecarManager
 
@@ -52,6 +54,11 @@ class HLSProxySidecarMixin:
         request: web.Request,
         external_prefix: str,
     ) -> web.StreamResponse:
+        if not check_password(request):
+            return web.json_response(
+                {"detail": "Unauthorized: Invalid API Password"}, status=401
+            )
+
         manager = getattr(self, "sidecar_manager", None)
         if manager is None:
             return web.json_response(
@@ -153,6 +160,10 @@ class HLSProxySidecarMixin:
             return web.json_response(
                 {"status": "unavailable", "detail": "Toastflix sidecar is not configured"},
                 status=503,
+            )
+        if not check_password(request):
+            return web.json_response(
+                {"detail": "Unauthorized: Invalid API Password"}, status=401
             )
         return web.json_response(manager.memory_stats())
 
