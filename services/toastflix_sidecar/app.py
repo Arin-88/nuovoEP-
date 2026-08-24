@@ -335,7 +335,6 @@ app.router.add_post("/sync", sync_audio)
 # complete /dual/* path to the sidecar.
 app.router.add_post("/dual/offset/lookup", offset_lookup)
 app.router.add_post("/dual/offset/report", offset_report)
-app.router.add_post("/dual/sync", sync_audio)
 
 
 def main() -> None:
