@@ -318,7 +318,11 @@ async def sidecar_middleware(request: web.Request, handler) -> web.StreamRespons
     return response
 
 
-app = web.Application(middlewares=[sidecar_middleware])
+# Request envelope for rewritten audio playlists; AudioStore still caps playlists at 2 MiB.
+app = web.Application(
+    middlewares=[sidecar_middleware],
+    client_max_size=4 * 1024 * 1024,
+)
 app.on_startup.append(_start_cleanup)
 app.on_cleanup.append(_stop_cleanup)
 app.router.add_get("/health", health)
