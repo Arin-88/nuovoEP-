@@ -34,7 +34,8 @@ def create_app():
     sidecar_manager = SidecarManager(cache_dir=sidecar_cache_dir)
     proxy = HLSProxy(sidecar_manager=sidecar_manager)
 
-    app = web.Application()
+    # Allow rewritten audio playlists to reach the embedded sidecar.
+    app = web.Application(client_max_size=4 * 1024 * 1024)
     app['proxy'] = proxy
     app['sidecar_manager'] = sidecar_manager
 
