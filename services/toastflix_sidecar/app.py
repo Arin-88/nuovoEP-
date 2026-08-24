@@ -184,6 +184,41 @@ async def cached_audio(request: web.Request) -> web.Response:
     })
 
 
+async def cache_status(request: web.Request) -> web.Response:
+    """Return real remote cache state for Toast Stream's manifest labels."""
+    body = await _json_body(request)
+    media_key = str(body.get("mediaKey") or body.get("media_key") or "")
+    try:
+        resolution = int(body.get("resolution") or 0)
+    except (TypeError, ValueError) as exc:
+        raise SidecarError(400, "invalid resolution") from exc
+    video_fingerprint = str(
+        body.get("videoFingerprint")
+        or body.get("video_fingerprint")
+        or ""
+    )
+    if not media_key or resolution <= 0 or not video_fingerprint:
+        raise SidecarError(400, "mediaKey, resolution and videoFingerprint required")
+
+    offset = await offsets.cache_status(body)
+    return _json({
+        "audio": {
+            "ita": audio.cache_status(media_key, "ita"),
+            "eng": audio.cache_status(media_key, "eng"),
+        },
+        "offset": {
+            "cached": bool(offset and offset.get("status") == "ok"),
+            "status": offset.get("status") if offset else None,
+            "updated_at": offset.get("updated_at") if offset else None,
+        },
+        "video": {
+            "cached": False,
+            "persistent": False,
+            "mode": "direct",
+        },
+    })
+
+
 async def audio_playlist(request: web.Request) -> web.Response:
     hid = request.match_info["hid"]
     token = _require_session(request)
@@ -347,6 +382,7 @@ app.router.add_get("/health", health)
 app.router.add_post("/session", create_session)
 app.router.add_post("/dual/aprep", prepare_audio)
 app.router.add_post("/dual/acache", cached_audio)
+app.router.add_post("/dual/cache/status", cache_status)
 app.router.add_get("/dual/aud/{hid}/audio.m3u8", audio_playlist)
 app.router.add_get("/dual/aud/{hid}/init.mp4", audio_init)
 app.router.add_get(r"/dual/aud/{hid}/s{idx:\d+}.m4s", audio_segment)

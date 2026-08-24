@@ -173,6 +173,34 @@ class AudioStore:
         # call /dual/aprep again and receive a fresh in-memory track.
         return None
 
+    def cache_status(self, media_key: str, language: str) -> dict:
+        """Report active state without pretending in-memory tracks are cache."""
+        aliases = {
+            "ita": {"ita", "it", "italian", "italiano"},
+            "eng": {"eng", "en", "english"},
+        }
+        wanted = aliases.get(str(language or "").lower().strip(), set())
+        candidates = [
+            (track["last_used"], hid, track["metadata"])
+            for hid, track in self._tracks.items()
+            if str(track["metadata"].get("media_key") or "") == str(media_key or "")
+            and str(track["metadata"].get("language") or "").lower() in wanted
+        ]
+        if not candidates:
+            return {
+                "cached": False,
+                "persistent": False,
+                "active": False,
+            }
+        _, hid, metadata = max(candidates, key=lambda item: item[0])
+        return {
+            "cached": False,
+            "persistent": False,
+            "active": True,
+            "hid": hid,
+            "audio_fingerprint": metadata.get("source_fingerprint", ""),
+        }
+
     def cleanup_idle(self, idle_seconds: float = TRACK_IDLE_SECONDS) -> int:
         """Release tracks whose player stopped requesting segments."""
         now = time.monotonic()

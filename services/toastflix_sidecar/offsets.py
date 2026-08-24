@@ -85,6 +85,56 @@ class OffsetStore:
                 pass
         return await asyncio.to_thread(self._local_get, payload["cache_key"])
 
+    def _local_cache_status(self, payload: dict):
+        media_key = str(payload.get("mediaKey") or payload.get("media_key") or "")
+        try:
+            resolution = int(payload.get("resolution") or 0)
+        except (TypeError, ValueError):
+            return None
+        video_fp = str(
+            payload.get("videoFingerprint")
+            or payload.get("video_fingerprint")
+            or ""
+        )
+        audio_fp = str(
+            payload.get("audioFingerprint")
+            or payload.get("audio_fingerprint")
+            or ""
+        )
+        if not media_key or resolution <= 0 or not video_fp:
+            return None
+
+        with self._connect() as conn:
+            if audio_fp:
+                cache_key = self.key(media_key, resolution, video_fp, audio_fp)
+                row = conn.execute(
+                    "SELECT status, offset_seconds, rate, confidence, updated_at "
+                    "FROM offsets WHERE cache_key = ?",
+                    (cache_key,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT status, offset_seconds, rate, confidence, updated_at "
+                    "FROM offsets WHERE media_key = ? AND resolution = ? "
+                    "AND video_fingerprint = ? "
+                    "ORDER BY CASE WHEN status = 'ok' THEN 0 ELSE 1 END, "
+                    "updated_at DESC LIMIT 1",
+                    (media_key, resolution, video_fp),
+                ).fetchone()
+        if not row:
+            return None
+        status, offset, rate, confidence, updated_at = row
+        return {
+            "status": status,
+            "offset": offset,
+            "rate": rate,
+            "confidence": confidence,
+            "updated_at": updated_at,
+        }
+
+    async def cache_status(self, payload: dict):
+        return await asyncio.to_thread(self._local_cache_status, payload)
+
     def _local_put(self, payload: dict, result: dict):
         with self._connect() as conn:
             conn.execute(
