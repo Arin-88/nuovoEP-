@@ -35,6 +35,9 @@ class AudioStore:
         # reference to them. It cannot grow permanently with every new HID.
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._tracks: dict[str, dict] = {}
+        # Sync requests can wait in the global queue for longer than the
+        # normal player-idle timeout. Keep those tracks alive temporarily.
+        self._pinned: dict[str, int] = {}
 
     def _lock(self, hid: str):
         return self._locks.setdefault(hid, asyncio.Lock())
@@ -58,12 +61,16 @@ class AudioStore:
         expired = [
             key_id
             for key_id, track in self._tracks.items()
-            if now - track["last_used"] > self.TRACK_TTL_SECONDS
+            if key_id not in self._pinned
+            and now - track["last_used"] > self.TRACK_TTL_SECONDS
         ]
         for key_id in expired:
             self._tracks.pop(key_id, None)
         while len(self._tracks) > self.MAX_TRACKS:
-            oldest = min(self._tracks, key=lambda key_id: self._tracks[key_id]["last_used"])
+            candidates = [key_id for key_id in self._tracks if key_id not in self._pinned]
+            if not candidates:
+                break
+            oldest = min(candidates, key=lambda key_id: self._tracks[key_id]["last_used"])
             self._tracks.pop(oldest, None)
 
     @staticmethod
@@ -146,6 +153,18 @@ class AudioStore:
     def metadata(self, hid: str):
         return self._track(hid)["metadata"]
 
+    def pin(self, hid: str) -> None:
+        """Keep an audio track alive while a queued sync request is running."""
+        self._track(hid)
+        self._pinned[hid] = self._pinned.get(hid, 0) + 1
+
+    def unpin(self, hid: str) -> None:
+        count = self._pinned.get(hid, 0)
+        if count <= 1:
+            self._pinned.pop(hid, None)
+        else:
+            self._pinned[hid] = count - 1
+
     def key_bytes(self, hid: str) -> bytes:
         return self._track(hid)["key"]
 
@@ -159,6 +178,8 @@ class AudioStore:
         now = time.monotonic()
         removed = 0
         for hid, track in list(self._tracks.items()):
+            if hid in self._pinned:
+                continue
             lock = self._locks.get(hid)
             if lock is not None and lock.locked():
                 continue

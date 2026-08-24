@@ -323,9 +323,14 @@ class SyncEngine:
         # Offset detection invokes several downloads and decoder processes.
         # Serialize it so concurrent Toastflix sessions cannot multiply the
         # CPU/RAM/network cost on a personal EasyProxy instance.
-        async with self._sync_semaphore:
-            self.routing = from_values(payload.get("_routing"), payload)
-            return await self._measure(payload)
+        audio_hid = str(payload.get("audio_hid") or "")
+        self.audio.pin(audio_hid)
+        try:
+            async with self._sync_semaphore:
+                self.routing = from_values(payload.get("_routing"), payload)
+                return await self._measure(payload)
+        finally:
+            self.audio.unpin(audio_hid)
 
     async def _measure(self, payload: dict):
         self._downloaded_bytes = 0
