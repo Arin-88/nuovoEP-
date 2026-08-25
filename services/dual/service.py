@@ -83,7 +83,12 @@ def _require_session(request: web.Request, body: dict | None = None) -> str:
 def _base_url(request: web.Request) -> str:
     # EasyProxy supplies these headers when forwarding a public request. This
     # Reconstruct the public URL from the headers added by EasyProxy.
-    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip()
+    cf_visitor = request.headers.get("CF-Visitor", "").lower()
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip().lower()
+    if '"scheme"' in cf_visitor and "https" in cf_visitor:
+        scheme = "https"
+    if scheme not in {"http", "https"}:
+        scheme = request.scheme
     host = request.headers.get("X-Forwarded-Host", request.host).split(",", 1)[0].strip()
     prefix = request.headers.get("X-Forwarded-Prefix", "").split(",", 1)[0].strip().rstrip("/")
     return f"{scheme}://{host}{prefix}"
