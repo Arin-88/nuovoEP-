@@ -175,6 +175,29 @@ def _is_master(text: str) -> bool:
     return "#EXT-X-STREAM-INF:" in text or "#EXT-X-MEDIA:" in text
 
 
+def _playlist_durations(text: str) -> list[float]:
+    durations: list[float] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("#EXTINF:"):
+            continue
+        try:
+            durations.append(float(line.split(":", 1)[1].split(",", 1)[0]))
+        except ValueError:
+            return []
+    return durations
+
+
+def _same_audio_timeline(left: str, right: str) -> bool:
+    left_durations = _playlist_durations(left)
+    right_durations = _playlist_durations(right)
+    return (
+        bool(left_durations)
+        and len(left_durations) == len(right_durations)
+        and all(abs(a - b) <= 0.02 for a, b in zip(left_durations, right_durations))
+    )
+
+
 def _master_entries(text: str, base_url: str) -> tuple[list[dict], list[dict]]:
     variants: list[dict] = []
     audios: list[dict] = []
@@ -496,6 +519,43 @@ class HLSProxyDualMixin:
         selected = "|".join(f"{key}:{headers[key]}" for key in sorted(headers))
         return hashlib.sha1(f"{url}|{selected}".encode()).hexdigest()[:20]
 
+    async def _prepare_dual_audio(
+        self,
+        request,
+        source: dict,
+        playlist: str,
+        playlist_base: str,
+        token: str,
+        media_key: str,
+        language: str,
+    ) -> dict:
+        key_uri = self._audio_key(playlist)
+        key_bytes = b""
+        if key_uri:
+            key_source = dict(source)
+            key_source["url"] = urljoin(playlist_base, key_uri)
+            key_bytes, _ = await self._fetch_dual(key_source, binary=True)
+            if len(key_bytes) != 16:
+                raise DualLinksError(400, "audio AES key must be 16 bytes")
+        return await self._dual_json(
+            request,
+            "POST",
+            "/dual/aprep",
+            {
+                "token": token,
+                "playlist": playlist,
+                "key": base64.b64encode(key_bytes).decode(),
+                "mediaKey": media_key,
+                "lang": language,
+                "baseUrl": playlist_base,
+                "headers": source.get("headers") or {},
+                "warp_off": bool(source.get("warp_off")),
+                "proxy_off": bool(source.get("proxy_off")),
+                "proxy_url": source.get("forced_proxy") or "",
+                "extractor_name": source.get("extractor_name") or "",
+            },
+        )
+
     async def _dual_json(self, request, method: str, path: str, body: dict | None = None) -> dict:
         if method != "POST":
             raise DualLinksError(500, "unsupported internal DUAL method")
@@ -689,15 +749,6 @@ class HLSProxyDualMixin:
         audio_media["url"] = selected_audio_url
         audio_media["manifest"] = ""
         audio_playlist, audio_playlist_base = await self._manifest(audio_media)
-        key_uri = self._audio_key(audio_playlist)
-        key_bytes = b""
-        if key_uri:
-            key_url = urljoin(audio_playlist_base, key_uri)
-            key_source = dict(audio_media)
-            key_source["url"] = key_url
-            key_bytes, _ = await self._fetch_dual(key_source, binary=True)
-            if len(key_bytes) != 16:
-                raise DualLinksError(400, "audio AES key must be 16 bytes")
 
         media_key = str(body.get("media_key") or body.get("mediaKey") or "").strip()
         if not media_key:
@@ -711,26 +762,14 @@ class HLSProxyDualMixin:
         if not token:
             raise DualLinksError(502, "DUAL service did not return a session token")
 
-        audio_routing = {
-            "warp_off": bool(audio.get("warp_off")),
-            "proxy_off": bool(audio.get("proxy_off")),
-            "proxy_url": audio.get("forced_proxy") or "",
-            "extractor_name": audio.get("extractor_name") or "",
-        }
-        prepared = await self._dual_json(
+        prepared = await self._prepare_dual_audio(
             request,
-            "POST",
-            "/dual/aprep",
-            {
-                "token": token,
-                "playlist": audio_playlist,
-                "key": base64.b64encode(key_bytes).decode(),
-                "mediaKey": media_key,
-                "lang": audio_lang,
-                "baseUrl": audio_playlist_base,
-                "headers": audio.get("headers") or {},
-                **audio_routing,
-            },
+            audio_media,
+            audio_playlist,
+            audio_playlist_base,
+            token,
+            media_key,
+            audio_lang,
         )
         audio_hid = str(prepared.get("hid") or "")
         if not audio_hid:
@@ -742,23 +781,66 @@ class HLSProxyDualMixin:
             "proxy_url": video.get("forced_proxy") or "",
             "extractor_name": video.get("extractor_name") or "",
         }
-        synced = await self._dual_json(
-            request,
-            "POST",
-            "/sync",
-            {
+        def sync_body(candidate: dict) -> dict:
+            return {
                 "token": token,
                 "media_key": media_key,
                 "resolution": resolution,
                 "video_url": video_url,
                 "video_headers": video.get("headers") or {},
                 "reference_audio_url": reference_audio_url,
-                "audio_hid": audio_hid,
-                "audio_fingerprint": prepared.get("audio_fingerprint") or "",
+                "audio_hid": candidate.get("hid") or "",
+                "audio_fingerprint": candidate.get("audio_fingerprint") or "",
                 "video_fingerprint": video_fingerprint,
                 **video_routing,
-            },
+            }
+
+        synced = await self._dual_json(
+            request, "POST", "/sync", sync_body(prepared)
         )
+        bridge_used = False
+        if str(synced.get("status") or "") != "ok" and audio_lang != "eng":
+            try:
+                bridge_url, bridge_meta = self._pick_audio(audio_text, audio_base, "eng")
+                if bridge_url != selected_audio_url:
+                    bridge_media = dict(audio)
+                    bridge_media["url"] = bridge_url
+                    bridge_media["manifest"] = ""
+                    bridge_playlist, bridge_base = await self._manifest(bridge_media)
+                    if _same_audio_timeline(audio_playlist, bridge_playlist):
+                        bridge = await self._prepare_dual_audio(
+                            request,
+                            bridge_media,
+                            bridge_playlist,
+                            bridge_base,
+                            token,
+                            media_key,
+                            "eng",
+                        )
+                        bridge_sync = await self._dual_json(
+                            request, "POST", "/sync", sync_body(bridge)
+                        )
+                        if str(bridge_sync.get("status") or "") == "ok":
+                            synced = bridge_sync
+                            bridge_used = True
+                            # Refresh requested output after the extra sync work.
+                            prepared = await self._prepare_dual_audio(
+                                request,
+                                audio_media,
+                                audio_playlist,
+                                audio_playlist_base,
+                                token,
+                                media_key,
+                                audio_lang,
+                            )
+                            audio_hid = str(prepared.get("hid") or "")
+                            logger.info(
+                                "[DUAL] direct %s sync failed; English bridge '%s' succeeded",
+                                audio_lang,
+                                bridge_meta.get("name") or "English",
+                            )
+            except DualLinksError as exc:
+                logger.warning("[DUAL] English sync bridge unavailable: %s", exc.message)
         status = str(synced.get("status") or "")
         if status != "ok":
             detail = synced.get("message") or synced.get("detail") or "DUAL sync failed"
@@ -775,6 +857,8 @@ class HLSProxyDualMixin:
             "audio_hid": audio_hid,
             "sync": synced,
         }
+        if bridge_used:
+            result["sync_bridge"] = "eng"
         result["m3u8"] = self._dual_master(result)
         return result
 

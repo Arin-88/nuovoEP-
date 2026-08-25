@@ -300,7 +300,7 @@ class SyncEngine:
         return [(value - mean) / std for value in envelope]
 
     @staticmethod
-    def _lag(reference, candidate, max_seconds=5):
+    def _lag(reference, candidate, max_seconds=15):
         best = (-2.0, 0)
         for lag in range(-max_seconds * 100, max_seconds * 100 + 1):
             if lag >= 0:
