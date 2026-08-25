@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -598,6 +599,35 @@ class VixSrcExtractor:
 
         return urljoin(site_url, embed_path)
 
+    async def _resolve_streamingcommunity_embed_url(self, url: str, forced_proxy: str | None = None) -> str:
+        """Resolve a StreamingCommunity watch page to its VixCloud embed URL."""
+        page_response = await self._make_robust_request(
+            url,
+            headers=self._fresh_headers(referer=self._normalize_base_site(url) + "/"),
+            forced_proxy=forced_proxy,
+        )
+        page_html = html.unescape(page_response.text).replace("\\/", "/")
+        embed_page_match = re.search(r'"embedUrl"\s*:\s*"([^"]+)"', page_html)
+        if not embed_page_match:
+            raise ExtractorError("StreamingCommunity embed page not found")
+
+        embed_page_url = urljoin(url, embed_page_match.group(1))
+        iframe_response = await self._make_robust_request(
+            embed_page_url,
+            headers=self._fresh_headers(referer=url),
+            forced_proxy=forced_proxy,
+        )
+        iframe_html = html.unescape(iframe_response.text)
+        iframe_match = re.search(
+            r"<iframe[^>]+src\s*=\s*[\"']([^\"']+)",
+            iframe_html,
+            re.IGNORECASE,
+        )
+        if not iframe_match:
+            raise ExtractorError("StreamingCommunity VixCloud iframe not found")
+
+        return self._replace_vixsrc_domain(urljoin(embed_page_url, iframe_match.group(1)))
+
     def _extract_playlist_from_embed(self, script_content: str) -> str:
         """Extract playlist URL from current embed structure, with legacy fallback."""
         master_playlist_match = re.search(
@@ -628,7 +658,7 @@ class VixSrcExtractor:
                         ("expires", expires_match.group(1)),
                     ]
                 )
-                if "window.canPlayFHD = true" in script_content or "canPlayFHD" in script_content:
+                if re.search(r"window\.canPlayFHD\s*=\s*true\b", script_content, re.IGNORECASE):
                     query_params.append(("h", "1"))
                 query_params.append(("lang", "it"))
                 if asn_match and asn_match.group(1):
@@ -661,7 +691,7 @@ class VixSrcExtractor:
             ]
         )
 
-        if "window.canPlayFHD = true" in script_content or "canPlayFHD" in script_content:
+        if re.search(r"window\.canPlayFHD\s*=\s*true\b", script_content, re.IGNORECASE):
             query_params.append(("h", "1"))
 
         query_params.append(("lang", "it"))
@@ -709,6 +739,12 @@ class VixSrcExtractor:
                 forced_proxy = self._normalize_proxy_url(forced_proxy)
             parsed_url = urlparse(url)
             response = None
+            resolved_streamingcommunity = False
+
+            if "/watch/" in parsed_url.path and "streamingcommunity" in parsed_url.netloc.lower():
+                url = await self._resolve_streamingcommunity_embed_url(url, forced_proxy=forced_proxy)
+                parsed_url = urlparse(url)
+                resolved_streamingcommunity = True
 
             if "/playlist/" in parsed_url.path:
                 logger.info("URL is already a VixSrc manifest, no extraction required.")
@@ -737,7 +773,8 @@ class VixSrcExtractor:
                 }
 
             if "/embed/" in parsed_url.path:
-                self._raise_if_embed_expired(url)
+                if not resolved_streamingcommunity:
+                    self._raise_if_embed_expired(url)
                 vix_url = url
                 try:
                     response = await self._make_curl_request(
