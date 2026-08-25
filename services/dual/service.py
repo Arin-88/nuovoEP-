@@ -40,7 +40,7 @@ def configure_cache(cache_dir: str | Path) -> None:
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     audio = AudioStore(str(cache_path / "audio"))
-    offsets = OffsetStore(str(cache_path / "offsets.db"))
+    offsets = OffsetStore()
     sync_engine = SyncEngine(audio, offsets)
 
 
@@ -359,6 +359,8 @@ async def _stop_cleanup(app: web.Application) -> None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+    if offsets is not None:
+        offsets.close()
 
 
 def _is_dual_path(path: str) -> bool:
@@ -409,7 +411,7 @@ def memory_stats() -> dict:
         "audio_tracks": len(tracks),
         "pinned_audio_tracks": len(getattr(audio, "_pinned", {})) if audio is not None else 0,
         "audio_cache": "memory_only",
-        "offset_cache": "sqlite",
+        "offset_cache": "mongodb_shared",
     }
 
 

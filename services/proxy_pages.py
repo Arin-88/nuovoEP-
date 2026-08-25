@@ -311,7 +311,7 @@ class HLSProxyPagesMixin:
                 "/dual/menifest.m3u8": "DUAL HLS master with synchronized video + audio - ?d=<Base64 JSON>",
                 "/dual/manifest.m3u8": "Correctly spelled alias for the DUAL HLS master - ?d=<Base64 JSON>",
                 "/dual/sync/links": "DUAL JSON test for synchronizing video and audio",
-                "/dual/cache/status": "Checks only whether the DUAL offset is already in the SQLite database",
+                "/dual/cache/status": "Checks only whether the DUAL offset exists in the shared MongoDB cache",
                 "/dual/aud/{hid}/audio.m3u8": "Synchronized DUAL audio playlist",
                 "/dual/aud/{hid}/init.mp4": "DUAL audio init segment",
                 "/dual/aud/{hid}/s{idx}.m4s": "DUAL audio segment",
@@ -522,7 +522,7 @@ class HLSProxyPagesMixin:
                 "/dual/cache/status": {
                     "post": {
                         "summary": "Check cached DUAL offset",
-                        "description": "Returns only whether the requested video/audio offset exists in the SQLite database. Audio is not exposed as a persistent cache.",
+                        "description": "Returns only whether the requested video/audio offset exists in the shared MongoDB cache. Audio is not exposed as a persistent cache.",
                         "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object"}}}},
                         "responses": {"200": {"description": "Offset cache status JSON"}, "400": {"description": "Missing media key, resolution or fingerprint"}, "401": {"description": "Invalid API password"}},
                         **({"security": security} if requires_password else {}),
