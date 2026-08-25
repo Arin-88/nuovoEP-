@@ -777,7 +777,7 @@
         <div id="panel-dual" class="tab-panel">
             <div class="glass-card">
                 <p style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:1rem;line-height:1.6;">
-                    Crea un unico manifest HLS con video e audio sincronizzato, compatibile con i player HLS. Il parametro <code style="color:var(--accent-primary);font-family:monospace;">d</code> contiene il payload JSON in Base64 URL-safe. La qualità video più alta viene scelta automaticamente.
+                    Create a single HLS manifest with synchronized video and audio, compatible with HLS players. The <code style="color:var(--accent-primary);font-family:monospace;">d</code> parameter contains the JSON payload encoded as URL-safe Base64. The highest available video quality is selected automatically.
                 </p>
                 <div class="form-group">
                     <label>Video URL</label>
@@ -816,7 +816,7 @@
                         <option value="hin">Hindi</option>
                         <option value="rus">Russian</option>
                     </select>
-                    <div class="form-hint">EasyProxy sceglie automaticamente la traccia migliore disponibile per la lingua selezionata.</div>
+                    <div class="form-hint">EasyProxy automatically selects the best available track for the selected language.</div>
                 </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
@@ -1149,7 +1149,7 @@
             const result = document.getElementById('dualResult');
 
             if (!videoUrl || !audioUrl) {
-                result.value = 'Inserisci Video URL e Audio page/URL.';
+                result.value = 'Enter both Video URL and Audio page/URL.';
                 document.getElementById('playDualResult').style.display = 'none';
                 return;
             }
