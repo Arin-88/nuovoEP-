@@ -411,10 +411,11 @@ class HLSProxyDualMixin:
         base_url: str,
         language: str,
         requested_alias: str = "",
+        bypass_language: bool = False,
     ) -> tuple[str, dict]:
         if not _is_master(text):
             return base_url, {"manifest": text, "base_url": base_url}
-        _, audios = _master_entries(text, base_url)
+        variants, audios = _master_entries(text, base_url)
         requested_alias = str(requested_alias or "").strip().lower()
         exact_alias = [
             item for item in audios
@@ -422,6 +423,49 @@ class HLSProxyDualMixin:
         ] if requested_alias else []
         matches = exact_alias or [item for item in audios if _language_match(item, language)]
         if not matches:
+            if bypass_language and not audios and variants:
+                def variant_quality(item: dict) -> tuple[int, int]:
+                    try:
+                        bandwidth = int(item.get("attributes", {}).get("BANDWIDTH") or 0)
+                    except (TypeError, ValueError):
+                        bandwidth = 0
+                    return item.get("height") or 0, bandwidth
+
+                selected = max(variants, key=variant_quality)
+                logger.warning(
+                    "[DUAL] no separate audio renditions; bypass enabled, using muxed variant %s",
+                    selected.get("url") or "",
+                )
+                return selected["url"], {
+                    "language": language,
+                    "name": "Muxed audio",
+                    "hls_language": language,
+                    "language_bypassed": True,
+                    "muxed_audio": True,
+                }
+            if bypass_language and audios:
+                fallback_pool = [
+                    item for item in audios
+                    if str(item.get("DEFAULT") or "").strip().upper() == "YES"
+                ] or audios
+                selected = max(
+                    fallback_pool,
+                    key=lambda item: (
+                        str(item.get("DEFAULT") or "").strip().upper() == "YES",
+                        *_audio_quality(item),
+                    ),
+                )
+                logger.warning(
+                    "[DUAL] audio language '%s' not matched; bypass enabled, using '%s'",
+                    language,
+                    selected.get("NAME") or selected.get("URI") or "default track",
+                )
+                return selected["url"], {
+                    "language": language,
+                    "name": selected.get("NAME") or "",
+                    "hls_language": selected.get("LANGUAGE") or language,
+                    "language_bypassed": True,
+                }
             available = sorted({item.get("LANGUAGE") or item.get("NAME") or "unknown" for item in audios})
             suffix = ", ".join(available[:12]) or "none"
             raise DualLinksError(400, f"audio language '{language}' not found; available: {suffix}")
@@ -439,10 +483,13 @@ class HLSProxyDualMixin:
             if not line.startswith("#EXT-X-KEY:"):
                 continue
             attrs = _attrs(line.split(":", 1)[1])
-            if attrs.get("METHOD", "").upper() != "AES-128" or not attrs.get("URI"):
-                break
+            method = attrs.get("METHOD", "").upper()
+            if method == "NONE":
+                return ""
+            if method != "AES-128" or not attrs.get("URI"):
+                raise DualLinksError(400, "selected audio uses unsupported encryption")
             return attrs["URI"]
-        raise DualLinksError(400, "selected audio has no AES-128 key")
+        return ""
 
     @staticmethod
     def _fingerprint(url: str, headers: dict) -> str:
@@ -607,6 +654,13 @@ class HLSProxyDualMixin:
         requested_audio_lang = str(
             body.get("audio_lang") or body.get("audioLanguage") or ""
         ).strip()
+        bypass_audio_language = body.get(
+            "bypass_audio_language", body.get("audio_language_bypass", False)
+        )
+        bypass_audio_language = (
+            bypass_audio_language is True
+            or str(bypass_audio_language).strip().lower() in {"1", "true", "yes", "on"}
+        )
         audio_lang = _normalise_language(requested_audio_lang)
         if audio_lang not in _LANGUAGE_ALIASES:
             raise DualLinksError(400, "audio_lang is required; use a standard language code such as ita or eng")
@@ -625,18 +679,25 @@ class HLSProxyDualMixin:
 
         audio_text, audio_base = await self._manifest(audio)
         selected_audio_url, audio_meta = self._pick_audio(
-            audio_text, audio_base, audio_lang, requested_audio_lang
+            audio_text,
+            audio_base,
+            audio_lang,
+            requested_audio_lang,
+            bypass_audio_language,
         )
         audio_media = dict(audio)
         audio_media["url"] = selected_audio_url
         audio_media["manifest"] = ""
         audio_playlist, audio_playlist_base = await self._manifest(audio_media)
-        key_url = urljoin(audio_playlist_base, self._audio_key(audio_playlist))
-        key_source = dict(audio_media)
-        key_source["url"] = key_url
-        key_bytes, _ = await self._fetch_dual(key_source, binary=True)
-        if len(key_bytes) != 16:
-            raise DualLinksError(400, "audio AES key must be 16 bytes")
+        key_uri = self._audio_key(audio_playlist)
+        key_bytes = b""
+        if key_uri:
+            key_url = urljoin(audio_playlist_base, key_uri)
+            key_source = dict(audio_media)
+            key_source["url"] = key_url
+            key_bytes, _ = await self._fetch_dual(key_source, binary=True)
+            if len(key_bytes) != 16:
+                raise DualLinksError(400, "audio AES key must be 16 bytes")
 
         media_key = str(body.get("media_key") or body.get("mediaKey") or "").strip()
         if not media_key:
@@ -756,6 +817,11 @@ class HLSProxyDualMixin:
             )
         try:
             body = self._decode_dual_descriptor(request.query.get("d", ""))
+            bypass_query = str(
+                request.query.get("bypass_audio_language") or ""
+            ).strip().lower()
+            if bypass_query in {"1", "true", "yes", "on"}:
+                body["bypass_audio_language"] = True
             result = await self._build_dual_result(request, body)
             return web.Response(
                 text=result["m3u8"],

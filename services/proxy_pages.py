@@ -387,6 +387,7 @@ class HLSProxyPagesMixin:
                                 "example": "ita",
                             },
                             "resolution": {"type": "integer", "enum": [720, 1080, 1440, 2160], "description": "Optional override. Omit it to select the highest available video quality automatically.", "example": 2160},
+                            "bypass_audio_language": {"type": "boolean", "default": False, "description": "When true, ignore a language mismatch and use the DEFAULT or best available audio track."},
                             "reference_audio_url": {"type": "string", "format": "uri"},
                             "media_key": {"type": "string"},
                             "video_fingerprint": {"type": "string"},

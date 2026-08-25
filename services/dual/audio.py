@@ -113,9 +113,13 @@ class AudioStore:
         self._validate_segments(segments)
         if len(durations) < len(segments):
             raise ValueError("audio durations do not match segments")
-        key = base64.b64decode(key_b64, validate=True)
-        if len(key) != 16:
-            raise ValueError("AES key must be 16 bytes")
+        if key_b64:
+            key = base64.b64decode(key_b64, validate=True)
+            if len(key) != 16:
+                raise ValueError("AES key must be 16 bytes")
+        else:
+            # Valid HLS audio can be unencrypted.
+            key = b""
         safe_headers = {
             str(name): str(value).strip()
             for name, value in (headers or {}).items()
@@ -370,12 +374,16 @@ class AudioStore:
                     work / "src.ts",
                     metadata.get("routing"),
                 )
-                (work / "enc.key").write_bytes(self.key_bytes(hid))
-                iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
+                key_bytes = self.key_bytes(hid)
+                key_line = ""
+                if key_bytes:
+                    (work / "enc.key").write_bytes(key_bytes)
+                    iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
+                    key_line = f'#EXT-X-KEY:METHOD=AES-128,URI="enc.key"{iv}\n'
                 (work / "input.m3u8").write_text(
                     "#EXTM3U\n#EXT-X-VERSION:3\n"
                     f"#EXT-X-TARGETDURATION:{int(metadata['durs'][index]) + 1}\n"
-                    f"#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\"{iv}\n"
+                    f"{key_line}"
                     f"#EXTINF:{metadata['durs'][index]:.6f},\nsrc.ts\n#EXT-X-ENDLIST\n"
                 )
                 command = ["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-i", "input.m3u8"]

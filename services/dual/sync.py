@@ -252,11 +252,13 @@ class SyncEngine:
             available += metadata["durs"][item]
             if available >= local_seek + self.sample_seconds + 5:
                 break
-        iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
         lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
-                 f"#EXT-X-TARGETDURATION:{int(max(metadata['durs'][item] for item in selected)) + 1}",
-                 f'#EXT-X-KEY:METHOD=AES-128,URI="audio.key"{iv}']
-        (directory / "audio.key").write_bytes(self.audio.key_bytes(hid))
+                 f"#EXT-X-TARGETDURATION:{int(max(metadata['durs'][item] for item in selected)) + 1}"]
+        key_bytes = self.audio.key_bytes(hid)
+        if key_bytes:
+            iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
+            lines.append(f'#EXT-X-KEY:METHOD=AES-128,URI="audio.key"{iv}')
+            (directory / "audio.key").write_bytes(key_bytes)
         for number, item in enumerate(selected):
             name = f"audio-{number}.ts"
             await self._download(metadata["segs"][item], directory / name, metadata.get("headers") or {})

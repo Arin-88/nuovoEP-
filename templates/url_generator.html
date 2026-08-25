@@ -820,6 +820,12 @@
                 </div>
                 <div class="checkbox-grid">
                     <label class="checkbox-label">
+                        <input id="dualBypassAudioLanguage" type="checkbox">
+                        <div><span>Bypass audio language check</span><div class="checkbox-desc">Use only when the requested language is present but the playlist labels it incorrectly.</div></div>
+                    </label>
+                </div>
+                <div class="checkbox-grid">
+                    <label class="checkbox-label">
                         <input id="dualVideoWarpOff" type="checkbox">
                         <div><span>Video <code>warp=off</code></span><div class="checkbox-desc">Bypass WARP for the video source.</div></div>
                     </label>
@@ -1138,6 +1144,7 @@
             const audioUrl = document.getElementById('dualAudioUrl').value.trim();
             const audioExtractor = document.getElementById('dualAudioExtractor').value.trim();
             const audioLanguage = document.getElementById('dualAudioLanguage').value;
+            const bypassAudioLanguage = document.getElementById('dualBypassAudioLanguage').checked;
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const result = document.getElementById('dualResult');
 
@@ -1159,6 +1166,7 @@
             if (document.getElementById('dualAudioProxyOff').checked) audio.proxy_off = true;
 
             const payload = { video, audio, audio_lang: audioLanguage };
+            if (bypassAudioLanguage) payload.bypass_audio_language = true;
             const encoded = base64UrlEncodeUtf8(JSON.stringify(payload));
             const params = new URLSearchParams({ d: encoded });
             if (apiPassword) params.set('api_password', apiPassword);
@@ -1215,7 +1223,7 @@
 
         const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyBypassProxy', 'proxyDisableSSL', 'proxyNativeMpd'];
         const extractorInputs = ['extractorHost', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorBypassProxy', 'extractorDisableSSL'];
-        const dualInputs = ['dualVideoUrl', 'dualVideoExtractor', 'dualVideoExtractorSelect', 'dualAudioUrl', 'dualAudioExtractor', 'dualAudioExtractorSelect', 'dualAudioLanguage', 'dualVideoWarpOff', 'dualVideoProxyOff', 'dualAudioWarpOff', 'dualAudioProxyOff'];
+        const dualInputs = ['dualVideoUrl', 'dualVideoExtractor', 'dualVideoExtractorSelect', 'dualAudioUrl', 'dualAudioExtractor', 'dualAudioExtractorSelect', 'dualAudioLanguage', 'dualBypassAudioLanguage', 'dualVideoWarpOff', 'dualVideoProxyOff', 'dualAudioWarpOff', 'dualAudioProxyOff'];
 
         function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
         const autoProxy = debounce(() => { if (document.getElementById('destinationUrl').value.trim()) generateProxyUrl(); }, 300);
