@@ -58,6 +58,7 @@ _LANGUAGE_ALIASES = {
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
 _DUAL_ERROR_DURATION = 8
+_DUAL_SYNC_TIMEOUT_SECONDS = 75
 _DUAL_ERROR_MESSAGES = {
     "audio": (
         "REQUESTED AUDIO TRACK NOT FOUND",
@@ -573,6 +574,16 @@ class HLSProxyDualMixin:
         except dual_service.DualServiceError as exc:
             raise DualLinksError(exc.status, str(exc.detail)) from exc
 
+    async def _dual_sync_json(self, request, body: dict) -> dict:
+        """Bound sync work so the public HLS request can return its error playlist."""
+        try:
+            return await asyncio.wait_for(
+                self._dual_json(request, "POST", "/sync", body),
+                timeout=_DUAL_SYNC_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise DualLinksError(409, "DUAL sync timed out") from exc
+
     @staticmethod
     def _decode_dual_descriptor(value: str) -> dict:
         encoded = str(value or "").strip()
@@ -824,9 +835,7 @@ class HLSProxyDualMixin:
                 **video_routing,
             }
 
-        synced = await self._dual_json(
-            request, "POST", "/sync", sync_body(prepared)
-        )
+        synced = await self._dual_sync_json(request, sync_body(prepared))
         bridge_used = False
         if str(synced.get("status") or "") != "ok" and audio_lang != "eng":
             try:
@@ -846,8 +855,8 @@ class HLSProxyDualMixin:
                             media_key,
                             "eng",
                         )
-                        bridge_sync = await self._dual_json(
-                            request, "POST", "/sync", sync_body(bridge)
+                        bridge_sync = await self._dual_sync_json(
+                            request, sync_body(bridge)
                         )
                         if str(bridge_sync.get("status") or "") == "ok":
                             synced = bridge_sync
