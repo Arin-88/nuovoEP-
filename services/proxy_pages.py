@@ -431,9 +431,10 @@ class HLSProxyPagesMixin:
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
                         "responses": {
-                            "200": {"description": "Combined HLS master playlist, or a short English error video when audio/sync is unavailable", "content": {"application/vnd.apple.mpegurl": {"schema": {"type": "string"}}}},
+                            "200": {"description": "Combined HLS master playlist", "content": {"application/vnd.apple.mpegurl": {"schema": {"type": "string"}}}},
                             "400": {"description": "Invalid Base64 JSON descriptor or source"},
                             "401": {"description": "Invalid API password"},
+                            "409": {"description": "Synchronization unavailable; JSON error response"},
                             "502": {"description": "Extraction or upstream failure"},
                         },
                         **({"security": security} if requires_password else {}),
@@ -447,25 +448,7 @@ class HLSProxyPagesMixin:
                             {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},
                         ],
-                        "responses": {"200": {"description": "Combined HLS master playlist, or a short English error video when audio/sync is unavailable"}, "400": {"description": "Invalid descriptor"}, "401": {"description": "Invalid API password"}},
-                        **({"security": security} if requires_password else {}),
-                    }
-                },
-                "/dual/error/{kind}.m3u8": {
-                    "get": {
-                        "summary": "DUAL error video HLS",
-                        "description": "Returns a short English HLS video when the requested audio track is unavailable or audio/video synchronization cannot be calculated. Supported kinds: audio and sync.",
-                        "parameters": [{"name": "kind", "in": "path", "required": True, "schema": {"type": "string", "enum": ["audio", "sync"]}}, {"name": "api_password", "in": "query", "schema": {"type": "string"}}],
-                        "responses": {"200": {"description": "Short error HLS playlist"}, "401": {"description": "Invalid API password"}},
-                        **({"security": security} if requires_password else {}),
-                    }
-                },
-                "/dual/error/{kind}.ts": {
-                    "get": {
-                        "summary": "DUAL error video segment",
-                        "description": "Serves the generated MPEG-TS segment referenced by the DUAL error playlist.",
-                        "parameters": [{"name": "kind", "in": "path", "required": True, "schema": {"type": "string", "enum": ["audio", "sync"]}}, {"name": "api_password", "in": "query", "schema": {"type": "string"}}],
-                        "responses": {"200": {"description": "MPEG-TS error video segment"}, "401": {"description": "Invalid API password"}},
+                        "responses": {"200": {"description": "Combined HLS master playlist"}, "400": {"description": "Invalid descriptor or unavailable audio; JSON error response"}, "401": {"description": "Invalid API password"}, "409": {"description": "Synchronization unavailable; JSON error response"}, "502": {"description": "Extraction or upstream failure"}},
                         **({"security": security} if requires_password else {}),
                     }
                 },

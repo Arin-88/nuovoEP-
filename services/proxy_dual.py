@@ -6,10 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
 import urllib.parse
 from typing import Any
 from urllib.parse import urljoin
@@ -57,87 +54,21 @@ _LANGUAGE_ALIASES = {
     "rus": {"ru", "rus", "russian", "russo", "russian 5.1 (dd+)"},
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
-_DUAL_ERROR_DURATION = 8
-_DUAL_SYNC_TIMEOUT_SECONDS = 75
-_DUAL_ERROR_MESSAGES = {
-    "audio": (
-        "REQUESTED AUDIO TRACK NOT FOUND",
-        "Try another language or source.",
-    ),
-    "sync": (
-        "AUDIO/VIDEO SYNC UNAVAILABLE",
-        "Synchronization is not possible for this source.",
-    ),
-}
+_DUAL_SYNC_TIMEOUT_SECONDS = 50
 
 
-def _dual_error_kind(error: BaseException) -> str | None:
-    """Map expected DUAL failures to a playable error-video category."""
+def _dual_error_code(error: BaseException) -> str:
+    """Map DUAL failures to stable API error codes."""
     status = int(getattr(error, "status", 0) or 0)
     message = str(getattr(error, "message", "") or error).lower()
     if status == 409 or any(
         marker in message
         for marker in ("sync", "synchron", "incompatible", "offset")
     ):
-        return "sync"
+        return "sync_unavailable"
     if "audio" in message and status in {0, 400, 404, 410, 422, 502}:
-        return "audio"
-    return None
-
-
-def _dual_font_file() -> str | None:
-    candidates = (
-        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf"),
-        r"C:\Windows\Fonts\segoeui.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    )
-    return next((path for path in candidates if os.path.isfile(path)), None)
-
-
-def _ffmpeg_filter_escape(value: str) -> str:
-    return str(value).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-
-
-def _generate_dual_error_segment(kind: str) -> bytes:
-    """Generate one short baseline H.264/AAC MPEG-TS segment for HLS players."""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("FFmpeg is required to generate the DUAL error video")
-
-    title, subtitle = _DUAL_ERROR_MESSAGES[kind]
-    font = _dual_font_file()
-    font_clause = f"fontfile='{_ffmpeg_filter_escape(font)}':" if font else ""
-    drawtext = ",".join([
-        f"drawtext={font_clause}text='{title}':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=135:box=1:boxcolor=0x111827CC:boxborderw=12",
-        f"drawtext={font_clause}text='{subtitle}':fontcolor=0xCBD5E1:fontsize=18:x=(w-text_w)/2:y=205",
-    ])
-    command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-f", "lavfi", "-i", "color=c=0x111827:s=640x360:r=30",
-        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-        "-t", str(_DUAL_ERROR_DURATION), "-vf", drawtext,
-        "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast",
-        "-profile:v", "baseline", "-level:v", "3.0", "-tune", "stillimage",
-        "-pix_fmt", "yuv420p", "-r", "30", "-bf", "0", "-refs", "1",
-        "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
-        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "96k", "-ar", "44100", "-ac", "2",
-        "-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
-        "-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers",
-        "-f", "mpegts", "pipe:1",
-    ]
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=30,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if completed.returncode != 0 or not completed.stdout:
-        detail = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"FFmpeg error video generation failed: {detail[-400:]}")
-    return completed.stdout
+        return "audio_unavailable"
+    return "dual_error"
 
 
 def _normalise_language(value: Any) -> str:
@@ -655,101 +586,6 @@ class HLSProxyDualMixin:
             "",
         ])
 
-    async def _dual_error_segment(self, kind: str) -> bytes:
-        if kind not in _DUAL_ERROR_MESSAGES:
-            raise ValueError("unknown DUAL error video")
-        cache = getattr(self, "_dual_error_segments", None)
-        lock = getattr(self, "_dual_error_lock", None)
-        if cache is None or lock is None:
-            raise RuntimeError("DUAL error video cache is not initialized")
-        if kind not in cache:
-            async with lock:
-                if kind not in cache:
-                    cache[kind] = await asyncio.to_thread(
-                        _generate_dual_error_segment, kind
-                    )
-        return cache[kind]
-
-    async def _dual_error_manifest(self, request, kind: str) -> web.Response:
-        try:
-            await self._dual_error_segment(kind)
-        except Exception as exc:
-            logger.error("DUAL error video unavailable: %s", exc)
-            return web.json_response(
-                {
-                    "status": "error",
-                    "detail": "DUAL error video unavailable; FFmpeg is required",
-                },
-                status=502,
-            )
-
-        # Root-relative: the manifest can be returned by /dual/menifest.m3u8
-        # or /dual/error/{kind}.m3u8, but the segment always lives under /dual/error/.
-        segment_url = f"/dual/error/{kind}.ts"
-        api_password = request.query.get("api_password")
-        if api_password:
-            segment_url = f"{segment_url}?{urllib.parse.urlencode({'api_password': api_password})}"
-        manifest = "\n".join([
-            "#EXTM3U",
-            "#EXT-X-VERSION:3",
-            "#EXT-X-INDEPENDENT-SEGMENTS",
-            f"#EXT-X-TARGETDURATION:{_DUAL_ERROR_DURATION}",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
-            "#EXT-X-MEDIA-SEQUENCE:0",
-            f"#EXTINF:{_DUAL_ERROR_DURATION}.000,",
-            segment_url,
-            "#EXT-X-ENDLIST",
-            "",
-        ])
-        return web.Response(
-            text=manifest,
-            content_type="application/vnd.apple.mpegurl",
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-store",
-            },
-        )
-
-    async def handle_dual_error_m3u8(self, request):
-        """Return a short playable HLS video explaining an expected DUAL failure."""
-        if not check_password(request):
-            return web.Response(status=401, text="Unauthorized: Invalid API Password")
-        kind = str(request.match_info.get("kind") or "").lower()
-        if kind not in _DUAL_ERROR_MESSAGES:
-            return web.Response(status=404, text="Unknown DUAL error video")
-        if request.method == "HEAD":
-            return web.Response(
-                content_type="application/vnd.apple.mpegurl",
-                headers={"Cache-Control": "no-store"},
-            )
-        return await self._dual_error_manifest(request, kind)
-
-    async def handle_dual_error_segment(self, request):
-        """Serve the cached MPEG-TS segment used by the DUAL error HLS video."""
-        if not check_password(request):
-            return web.Response(status=401, text="Unauthorized: Invalid API Password")
-        kind = str(request.match_info.get("kind") or "").lower()
-        if kind not in _DUAL_ERROR_MESSAGES:
-            return web.Response(status=404, text="Unknown DUAL error video")
-        if request.method == "HEAD":
-            return web.Response(
-                content_type="video/mp2t",
-                headers={"Cache-Control": "no-store"},
-            )
-        try:
-            segment = await self._dual_error_segment(kind)
-        except Exception as exc:
-            logger.error("DUAL error segment unavailable: %s", exc)
-            return web.Response(status=502, text="DUAL error video unavailable")
-        return web.Response(
-            body=segment,
-            content_type="video/mp2t",
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-store",
-            },
-        )
-
     async def _build_dual_result(self, request, body: dict) -> dict:
         requested_audio_lang = str(
             body.get("audio_lang") or body.get("audioLanguage") or ""
@@ -802,19 +638,6 @@ class HLSProxyDualMixin:
         if not token:
             raise DualLinksError(502, "DUAL service did not return a session token")
 
-        prepared = await self._prepare_dual_audio(
-            request,
-            audio_media,
-            audio_playlist,
-            audio_playlist_base,
-            token,
-            media_key,
-            audio_lang,
-        )
-        audio_hid = str(prepared.get("hid") or "")
-        if not audio_hid:
-            raise DualLinksError(502, "DUAL service did not register the selected audio")
-
         video_routing = {
             "warp_off": bool(video.get("warp_off")),
             "proxy_off": bool(video.get("proxy_off")),
@@ -835,9 +658,12 @@ class HLSProxyDualMixin:
                 **video_routing,
             }
 
-        synced = await self._dual_sync_json(request, sync_body(prepared))
+        prepared = None
+        audio_hid = ""
+        synced = None
         bridge_used = False
-        if str(synced.get("status") or "") != "ok" and audio_lang != "eng":
+        bridge_attempted = False
+        if audio_lang != "eng":
             try:
                 bridge_url, bridge_meta = self._pick_audio(audio_text, audio_base, "eng")
                 if bridge_url != selected_audio_url:
@@ -855,30 +681,39 @@ class HLSProxyDualMixin:
                             media_key,
                             "eng",
                         )
+                        bridge_attempted = True
                         bridge_sync = await self._dual_sync_json(
                             request, sync_body(bridge)
                         )
                         if str(bridge_sync.get("status") or "") == "ok":
                             synced = bridge_sync
                             bridge_used = True
-                            # Refresh requested output after the extra sync work.
-                            prepared = await self._prepare_dual_audio(
-                                request,
-                                audio_media,
-                                audio_playlist,
-                                audio_playlist_base,
-                                token,
-                                media_key,
-                                audio_lang,
-                            )
-                            audio_hid = str(prepared.get("hid") or "")
                             logger.info(
-                                "[DUAL] direct %s sync failed; English bridge '%s' succeeded",
+                                "[DUAL] English-first sync succeeded; using requested %s track via '%s' offset",
                                 audio_lang,
                                 bridge_meta.get("name") or "English",
                             )
             except DualLinksError as exc:
                 logger.warning("[DUAL] English sync bridge unavailable: %s", exc.message)
+        if bridge_attempted and not bridge_used:
+            session_result = await self._dual_json(request, "POST", "/session", {})
+            token = str(session_result.get("token") or "")
+            if not token:
+                raise DualLinksError(502, "DUAL service did not return a fallback session token")
+        prepared = await self._prepare_dual_audio(
+            request,
+            audio_media,
+            audio_playlist,
+            audio_playlist_base,
+            token,
+            media_key,
+            audio_lang,
+        )
+        audio_hid = str(prepared.get("hid") or "")
+        if not audio_hid:
+            raise DualLinksError(502, "DUAL service did not register the selected audio")
+        if synced is None or str(synced.get("status") or "") != "ok":
+            synced = await self._dual_sync_json(request, sync_body(prepared))
         status = str(synced.get("status") or "")
         if status != "ok":
             detail = synced.get("message") or synced.get("detail") or "DUAL sync failed"
@@ -956,23 +791,31 @@ class HLSProxyDualMixin:
                 },
             )
         except DualLinksError as exc:
-            error_kind = _dual_error_kind(exc)
-            if error_kind:
-                return await self._dual_error_manifest(request, error_kind)
-            return web.json_response({"status": "error", "detail": exc.message}, status=exc.status)
+            return web.json_response(
+                {
+                    "status": "error",
+                    "code": _dual_error_code(exc),
+                    "detail": exc.message,
+                },
+                status=exc.status,
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
+            )
         except (ValueError, TypeError) as exc:
-            error_kind = _dual_error_kind(exc)
-            if error_kind:
-                return await self._dual_error_manifest(request, error_kind)
-            return web.json_response({"status": "error", "detail": str(exc)}, status=400)
+            return web.json_response(
+                {"status": "error", "code": "invalid_request", "detail": str(exc)},
+                status=400,
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
+            )
         except Exception as exc:
-            error_kind = _dual_error_kind(exc)
-            if error_kind:
-                return await self._dual_error_manifest(request, error_kind)
             logger.exception("DUAL server master build failed")
             return web.json_response(
-                {"status": "error", "detail": f"dual server build failed: {type(exc).__name__}"},
+                {
+                    "status": "error",
+                    "code": "internal_error",
+                    "detail": f"dual server build failed: {type(exc).__name__}",
+                },
                 status=502,
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
             )
 
 
