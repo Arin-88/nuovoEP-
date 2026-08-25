@@ -378,7 +378,12 @@ class SyncEngine:
         common = min(video_duration, reference_duration, audio_duration)
         if common < 90:
             raise ValueError("media too short")
-        positions = sorted({
+        fast_positions = sorted({
+            min(60.0, common * .1),
+            common * .6,
+            max(30.0, common - 90.0),
+        })
+        all_positions = sorted({
             min(60.0, common * .1),
             common * .2,
             common * .4,
@@ -386,10 +391,14 @@ class SyncEngine:
             common * .8,
             max(30.0, common - 90.0),
         })
+        additional_positions = [
+            position for position in all_positions if position not in fast_positions
+        ]
         measurements = []
-        with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
-            root = Path(directory)
-            for index, position in enumerate(positions):
+
+        async def collect(positions):
+            for position in positions:
+                index = len(measurements)
                 video_dir, audio_dir = root / f"video-{index}", root / f"audio-{index}"
                 video_dir.mkdir(), audio_dir.mkdir()
                 if reference_audio_url:
@@ -412,6 +421,32 @@ class SyncEngine:
                     raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
                 lag, correlation = self._lag(self._envelope(video_pcm), self._envelope(audio_pcm))
                 measurements.append({"position": position, "lag": lag, "offset": lag, "correlation": correlation})
+
+        with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
+            root = Path(directory)
+            await collect(fast_positions)
+            fast_valid = [item for item in measurements if item["correlation"] >= .65]
+            if len(fast_valid) == len(fast_positions):
+                measured = statistics.median(item["offset"] for item in fast_valid)
+                deviation = max(abs(item["offset"] - measured) for item in fast_valid)
+                if deviation <= .25:
+                    result = {
+                        "status": "ok",
+                        "offset": round(-measured + video_start_time, 3),
+                        "rate": 1.0,
+                        "confidence": min(item["correlation"] for item in fast_valid),
+                        "deviation": deviation,
+                        "sync_mode": "fast",
+                        "video_duration": video_duration,
+                        "audio_duration": audio_duration,
+                        "measurements": measurements,
+                    }
+                    if reference_audio_url:
+                        result["video_start_time"] = round(video_start_time, 3)
+                    result["cache_key"] = cache_key
+                    return result
+
+            await collect(additional_positions)
         # Require a quorum across the timeline. Some valid scenes have little
         # audio signal and produce low correlation; rejecting those alone made
         # otherwise stable sources fail. The offset deviation check remains
