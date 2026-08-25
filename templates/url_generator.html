@@ -844,9 +844,14 @@
                 </div>
                 <div class="btn-row">
                     <button id="copyDualResult" class="btn btn-secondary">Copy URL</button>
+                    <button id="showDualPayload" class="btn btn-secondary">Show Base64 JSON</button>
                     <button id="playDualResult" class="btn btn-primary" style="display: none; background: var(--secondary-gradient);">▶️ Test Stream</button>
                 </div>
                 <textarea id="dualResult" class="result-area" readonly rows="7" placeholder="Generated DUAL URL will appear here..."></textarea>
+                <div id="dualPayloadPanel" style="display:none;margin-top:1rem;">
+                    <div class="form-hint" style="margin-bottom:0.5rem;">Decoded JSON stored inside the URL-safe Base64 <code>d</code> parameter:</div>
+                    <textarea id="dualPayloadPreview" class="result-area" readonly rows="12"></textarea>
+                </div>
                 <div class="form-hint" style="margin-top:0.8rem;">First playback may take time because EasyProxy extracts the audio and calculates synchronization. The endpoint is <code>/dual/menifest.m3u8</code>.</div>
             </div>
         </div>
@@ -1137,6 +1142,28 @@
             return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
+        function base64UrlDecodeUtf8(value) {
+            const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
+            const binary = atob(padded);
+            return new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+        }
+
+        function updateDualPayloadPreview() {
+            let payload = {
+                video: { url: 'https://example.com/video.m3u8' },
+                audio: { url: 'https://example.com/audio.m3u8' },
+                audio_lang: 'ita'
+            };
+            try {
+                const generatedUrl = new URL(document.getElementById('dualResult').value.trim());
+                const encoded = generatedUrl.searchParams.get('d');
+                if (encoded) payload = JSON.parse(base64UrlDecodeUtf8(encoded));
+            } catch (_) {
+                // Keep the valid example until a DUAL URL has been generated.
+            }
+            document.getElementById('dualPayloadPreview').value = JSON.stringify(payload, null, 2);
+        }
+
         function generateDualUrl() {
             const videoUrl = document.getElementById('dualVideoUrl').value.trim();
             const videoExtractor = document.getElementById('dualVideoExtractor').value.trim();
@@ -1171,6 +1198,9 @@
             if (apiPassword) params.set('api_password', apiPassword);
             result.value = `${buildBaseUrl()}/dual/menifest.m3u8?${params.toString()}`;
             document.getElementById('playDualResult').style.display = 'inline-flex';
+            if (document.getElementById('dualPayloadPanel').style.display !== 'none') {
+                updateDualPayloadPreview();
+            }
         }
 
         async function generateBatch() {
@@ -1368,6 +1398,19 @@
                 testUrl.searchParams.set('web_test', '1');
                 openPlayerModal(testUrl.toString());
             }
+        });
+
+        document.getElementById('showDualPayload').addEventListener('click', (event) => {
+            const panel = document.getElementById('dualPayloadPanel');
+            if (panel.style.display !== 'none') {
+                panel.style.display = 'none';
+                event.currentTarget.textContent = 'Show Base64 JSON';
+                return;
+            }
+
+            updateDualPayloadPreview();
+            panel.style.display = 'block';
+            event.currentTarget.textContent = 'Hide Base64 JSON';
         });
     </script>
 
