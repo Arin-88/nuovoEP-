@@ -1,13 +1,11 @@
-"""Aiohttp server for the embedded Toastflix audio sidecar.
+"""In-process DUAL audio, offset and synchronisation service.
 
 The audio, offset and synchronisation engines are framework-independent. This
-module only exposes them over HTTP, using the aiohttp stack already required by
-EasyProxy.
+module exposes them as routes on EasyProxy's main aiohttp application.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import json
@@ -23,12 +21,10 @@ from .offsets import OffsetStore
 from .routing import as_payload, from_values
 from .security import SessionManager, request_token, resolves_publicly
 from .sync import SyncEngine
+from config import check_password
 
 
-logger = logging.getLogger("toastflix_sidecar")
-APP_DIR = Path(__file__).resolve().parent
-DOCKER_CACHE_DIR = Path("/data/recordings/sidecar_data")
-DEFAULT_CACHE_DIR = DOCKER_CACHE_DIR if Path("/data").is_dir() else APP_DIR / "data"
+logger = logging.getLogger("easyproxy.dual")
 SESSION_TTL = 21600
 BACKGROUND_CLEANUP_INTERVAL = 5
 API_PASSWORD = os.environ.get("API_PASSWORD", "").strip()
@@ -39,7 +35,7 @@ offsets = None
 sync_engine = None
 
 
-def _configure_cache(cache_dir: str | Path) -> None:
+def configure_cache(cache_dir: str | Path) -> None:
     global audio, offsets, sync_engine
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
@@ -48,10 +44,7 @@ def _configure_cache(cache_dir: str | Path) -> None:
     sync_engine = SyncEngine(audio, offsets)
 
 
-_configure_cache(DEFAULT_CACHE_DIR)
-
-
-class SidecarError(Exception):
+class DualServiceError(Exception):
     def __init__(self, status: int, detail: str | dict):
         super().__init__(detail)
         self.status = status
@@ -66,9 +59,9 @@ async def _json_body(request: web.Request) -> dict:
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-        raise SidecarError(400, "invalid JSON body") from exc
+        raise DualServiceError(400, "invalid JSON body") from exc
     if not isinstance(body, dict):
-        raise SidecarError(400, "JSON body must be an object")
+        raise DualServiceError(400, "JSON body must be an object")
     return body
 
 
@@ -77,13 +70,13 @@ def _query_int(request: web.Request, name: str, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
-        raise SidecarError(422, f"invalid query parameter: {name}") from exc
+        raise DualServiceError(422, f"invalid query parameter: {name}") from exc
 
 
 def _require_session(request: web.Request, body: dict | None = None) -> str:
     token = request_token(request, body)
     if not sessions.valid(token):
-        raise SidecarError(401, "sidecar session required")
+        raise DualServiceError(401, "DUAL session required")
     return token
 
 
@@ -130,18 +123,23 @@ def _audio_response(data: bytes, media_type: str, cache_control: str = "no-store
 
 
 async def health(request: web.Request) -> web.Response:
-    return _json({"status": "ok", "service": "toast-audio-sidecar", "public_url": None})
+    return _json({"status": "ok", "service": "easyproxy-dual", "public_url": None})
 
 
 async def create_session(request: web.Request) -> web.Response:
+    return _json(await create_session_data())
+
+
+async def create_session_data() -> dict:
     sessions.cleanup()
     token, expires_at = sessions.issue()
-    return _json({"token": token, "expires_at": expires_at, "ttl_seconds": sessions.ttl_seconds})
+    return {"token": token, "expires_at": expires_at, "ttl_seconds": sessions.ttl_seconds}
 
 
-async def prepare_audio(request: web.Request) -> web.Response:
-    body = await _json_body(request)
-    token = _require_session(request, body)
+async def prepare_audio_data(body: dict, request: web.Request) -> dict:
+    token = str(body.get("token") or "")
+    if not sessions.valid(token):
+        raise DualServiceError(401, "DUAL session required")
     routing = from_values(request.query, body)
     try:
         hid = await audio.register(
@@ -158,15 +156,20 @@ async def prepare_audio(request: web.Request) -> web.Response:
             if not await resolves_publicly(url):
                 raise ValueError("audio source does not resolve publicly")
     except (ValueError, OSError, json.JSONDecodeError) as exc:
-        raise SidecarError(400, str(exc)) from exc
+        raise DualServiceError(400, str(exc)) from exc
     metadata = audio.metadata(hid)
-    return _json({
+    return {
         "hid": hid,
         "url": _audio_url(request, hid, token),
         "language": str(body.get("lang") or "").lower(),
         "audio_fingerprint": metadata.get("source_fingerprint", ""),
         "routing": as_payload(routing),
-    })
+    }
+
+
+async def prepare_audio(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    return _json(await prepare_audio_data(body, request))
 
 
 async def cached_audio(request: web.Request) -> web.Response:
@@ -174,7 +177,7 @@ async def cached_audio(request: web.Request) -> web.Response:
     token = _require_session(request, body)
     hid = audio.find_cached(str(body.get("mediaKey") or ""), str(body.get("lang") or "").lower())
     if not hid:
-        raise SidecarError(404, "valid cached audio track not found")
+        raise DualServiceError(404, "valid cached audio track not found")
     metadata = audio.metadata(hid)
     return _json({
         "url": _audio_url(request, hid, token),
@@ -191,21 +194,17 @@ async def cache_status(request: web.Request) -> web.Response:
     try:
         resolution = int(body.get("resolution") or 0)
     except (TypeError, ValueError) as exc:
-        raise SidecarError(400, "invalid resolution") from exc
+        raise DualServiceError(400, "invalid resolution") from exc
     video_fingerprint = str(
         body.get("videoFingerprint")
         or body.get("video_fingerprint")
         or ""
     )
     if not media_key or resolution <= 0 or not video_fingerprint:
-        raise SidecarError(400, "mediaKey, resolution and videoFingerprint required")
+        raise DualServiceError(400, "mediaKey, resolution and videoFingerprint required")
 
     offset = await offsets.cache_status(body)
     return _json({
-        "audio": {
-            "ita": audio.cache_status(media_key, "ita"),
-            "eng": audio.cache_status(media_key, "eng"),
-        },
         "offset": {
             "cached": bool(offset and offset.get("status") == "ok"),
             "status": offset.get("status") if offset else None,
@@ -252,9 +251,9 @@ async def audio_playlist(request: web.Request) -> web.Response:
             headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
     except FileNotFoundError as exc:
-        raise SidecarError(410, "audio session expired") from exc
+        raise DualServiceError(410, "audio session expired") from exc
     except ValueError as exc:
-        raise SidecarError(404, str(exc)) from exc
+        raise DualServiceError(404, str(exc)) from exc
 
 
 async def audio_init(request: web.Request) -> web.Response:
@@ -270,9 +269,9 @@ async def audio_init(request: web.Request) -> web.Response:
         init_data, _ = await audio.fragment_bytes(hid, timeline[0]["idx"], offset_ms / 1000.0, rate_nano / 1_000_000_000)
         return _audio_response(init_data, "video/mp4")
     except FileNotFoundError as exc:
-        raise SidecarError(410, "audio session expired") from exc
+        raise DualServiceError(410, "audio session expired") from exc
     except (ValueError, RuntimeError) as exc:
-        raise SidecarError(404, str(exc)) from exc
+        raise DualServiceError(404, str(exc)) from exc
 
 
 async def audio_segment(request: web.Request) -> web.Response:
@@ -285,9 +284,9 @@ async def audio_segment(request: web.Request) -> web.Response:
         _, fragment_data = await audio.fragment_bytes(hid, index, offset_ms / 1000.0, rate_nano / 1_000_000_000)
         return _audio_response(fragment_data, "video/iso.segment")
     except FileNotFoundError as exc:
-        raise SidecarError(410, "audio session expired") from exc
+        raise DualServiceError(410, "audio session expired") from exc
     except (ValueError, RuntimeError) as exc:
-        raise SidecarError(404, str(exc)) from exc
+        raise DualServiceError(404, str(exc)) from exc
 
 
 async def offset_lookup(request: web.Request) -> web.Response:
@@ -302,19 +301,26 @@ async def offset_report(request: web.Request) -> web.Response:
     _require_session(request, body)
     result = body.get("offset")
     if not isinstance(result, dict):
-        raise SidecarError(400, "offset result required")
+        raise DualServiceError(400, "offset result required")
     await offsets.report(body, result)
     return _json({"ok": True})
 
 
 async def sync_audio(request: web.Request) -> web.Response:
     body = await _json_body(request)
-    _require_session(request, body)
+    return _json(await sync_audio_data(body, request))
+
+
+async def sync_audio_data(body: dict, request: web.Request) -> dict:
+    token = str(body.get("token") or "")
+    if not sessions.valid(token):
+        raise DualServiceError(401, "DUAL session required")
+    body = dict(body)
     body["_routing"] = as_payload(from_values(request.query, body))
     try:
         result = await sync_engine.measure(body)
     except FileNotFoundError as exc:
-        raise SidecarError(410, {
+        raise DualServiceError(410, {
             "code": "AUDIO_SESSION_EXPIRED",
             "message": str(exc) or "audio session expired",
         }) from exc
@@ -322,9 +328,9 @@ async def sync_audio(request: web.Request) -> web.Response:
         message = str(exc) or "audio sync failed"
         lowered = message.lower()
         code = "SYNC_BUSY" if "busy" in lowered else "SYNC_NETWORK"
-        raise SidecarError(422, {"code": code, "message": message}) from exc
+        raise DualServiceError(422, {"code": code, "message": message}) from exc
     await offsets.report(body, result)
-    return _json(result)
+    return result
 
 
 async def _cleanup_loop(app: web.Application) -> None:
@@ -350,20 +356,28 @@ async def _stop_cleanup(app: web.Application) -> None:
             await task
 
 
+def _is_dual_path(path: str) -> bool:
+    return path.startswith("/dual/")
+
+
 @web.middleware
-async def sidecar_middleware(request: web.Request, handler) -> web.StreamResponse:
+async def dual_middleware(request: web.Request, handler) -> web.StreamResponse:
+    if not _is_dual_path(request.path):
+        return await handler(request)
     if request.method == "OPTIONS":
         response: web.StreamResponse = web.Response(status=200)
+    elif not check_password(request):
+        response = _json({"detail": "Unauthorized: Invalid API Password"}, status=401)
     else:
         try:
             response = await handler(request)
-        except SidecarError as exc:
+        except DualServiceError as exc:
             response = _json({"detail": exc.detail}, status=exc.status)
         except web.HTTPException as exc:
             response = _json({"detail": exc.reason}, status=exc.status)
         except Exception:
-            logger.exception("Unhandled sidecar request error")
-            response = _json({"detail": "internal sidecar error"}, status=500)
+            logger.exception("Unhandled DUAL request error")
+            response = _json({"detail": "internal DUAL error"}, status=500)
 
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -371,49 +385,64 @@ async def sidecar_middleware(request: web.Request, handler) -> web.StreamRespons
     return response
 
 
-# Request envelope for rewritten audio playlists; AudioStore still caps playlists at 2 MiB.
-app = web.Application(
-    middlewares=[sidecar_middleware],
-    client_max_size=4 * 1024 * 1024,
-)
-app.on_startup.append(_start_cleanup)
-app.on_cleanup.append(_stop_cleanup)
-app.router.add_get("/health", health)
-app.router.add_post("/session", create_session)
-app.router.add_post("/dual/aprep", prepare_audio)
-app.router.add_post("/dual/acache", cached_audio)
-app.router.add_post("/dual/cache/status", cache_status)
-app.router.add_get("/dual/aud/{hid}/audio.m3u8", audio_playlist)
-app.router.add_get("/dual/aud/{hid}/init.mp4", audio_init)
-app.router.add_get(r"/dual/aud/{hid}/s{idx:\d+}.m4s", audio_segment)
-app.router.add_post("/offset/lookup", offset_lookup)
-app.router.add_post("/offset/report", offset_report)
-app.router.add_post("/sync", sync_audio)
-# Keep the canonical Toastflix namespace working when EasyProxy forwards the
-# complete /dual/* path to the sidecar.
-app.router.add_post("/dual/offset/lookup", offset_lookup)
-app.router.add_post("/dual/offset/report", offset_report)
+def memory_stats() -> dict:
+    """Return in-process DUAL memory and active-track information."""
+    try:
+        import psutil
+
+        process = psutil.Process(os.getpid())
+        rss_bytes = process.memory_info().rss
+    except (ImportError, OSError):
+        rss_bytes = 0
+    tracks = list(getattr(audio, "_tracks", {}).values()) if audio is not None else []
+    return {
+        "status": "running",
+        "mode": "in_process",
+        "pid": os.getpid(),
+        "rss_bytes": rss_bytes,
+        "rss_mb": round(rss_bytes / (1024 * 1024), 2),
+        "audio_tracks": len(tracks),
+        "pinned_audio_tracks": len(getattr(audio, "_pinned", {})) if audio is not None else 0,
+        "audio_cache": "memory_only",
+        "offset_cache": "sqlite",
+    }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Toast Audio Sidecar")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=3107)
-    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
-    args = parser.parse_args()
-    _configure_cache(args.cache_dir)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    )
-    logging.getLogger("aiohttp.access").setLevel(logging.INFO)
-    web.run_app(
-        app,
-        host=args.host,
-        port=args.port,
-        access_log=logging.getLogger("aiohttp.access"),
-    )
+async def handle_memory(request: web.Request) -> web.Response:
+    if not check_password(request):
+        return _json({"detail": "Unauthorized: Invalid API Password"}, status=401)
+    return _json(memory_stats())
 
 
-if __name__ == "__main__":
-    main()
+def install(app: web.Application, cache_dir: str | Path) -> None:
+    """Install DUAL routes and lifecycle hooks into EasyProxy's main app."""
+    configure_cache(cache_dir)
+    app.on_startup.append(_start_cleanup)
+    app.on_cleanup.append(_stop_cleanup)
+
+    # The old Sidecar API (/session, /sync, /offset/* and the generic
+    # /dual/{tail:.*} forwarder) is gone. The manifest endpoint calls the
+    # service in-process; only its generated audio URLs remain public.
+    app.router.add_get("/dual/aud/{hid}/audio.m3u8", audio_playlist)
+    app.router.add_get("/dual/aud/{hid}/init.mp4", audio_init)
+    app.router.add_get("/dual/aud/{hid}/s{idx:\\d+}.m4s", audio_segment)
+    # Single public cache check retained for Toast Stream's offset indicator.
+    app.router.add_post("/dual/cache/status", cache_status)
+
+
+__all__ = [
+    "DualServiceError",
+    "audio",
+    "cache_status",
+    "configure_cache",
+    "create_session",
+    "create_session_data",
+    "dual_middleware",
+    "handle_memory",
+    "install",
+    "memory_stats",
+    "prepare_audio",
+    "prepare_audio_data",
+    "sync_audio",
+    "sync_audio_data",
+]

@@ -321,7 +321,7 @@ class SyncEngine:
 
     async def measure(self, payload: dict):
         # Offset detection invokes several downloads and decoder processes.
-        # Serialize it so concurrent Toastflix sessions cannot multiply the
+        # Serialize it so concurrent DUAL sessions cannot multiply the
         # CPU/RAM/network cost on a personal EasyProxy instance.
         audio_hid = str(payload.get("audio_hid") or "")
         self.audio.pin(audio_hid)
@@ -378,7 +378,7 @@ class SyncEngine:
             raise ValueError("media too short")
         positions = sorted({min(60.0, common * .1), common * .5, max(30.0, common - 90.0)})
         measurements = []
-        with tempfile.TemporaryDirectory(prefix="sidecar-sync-") as directory:
+        with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
             root = Path(directory)
             for index, position in enumerate(positions):
                 video_dir, audio_dir = root / f"video-{index}", root / f"audio-{index}"

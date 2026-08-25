@@ -1,4 +1,4 @@
-"""Small aiohttp client helper shared by the embedded Toastflix sidecar."""
+"""Small aiohttp client helper shared by the in-process DUAL service."""
 
 from __future__ import annotations
 

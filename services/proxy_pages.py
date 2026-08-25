@@ -255,6 +255,7 @@ class HLSProxyPagesMixin:
                 "✅ Playlist building",
                 "✅ Supporto Proxy (SOCKS5, HTTP/S)",
                 "✅ Multi-extractor support",
+                "✅ DUAL video + audio sync with VLC HLS master",
                 "✅ CORS enabled",
             ],
             "extractors_loaded": list(self.extractors.keys()),
@@ -306,7 +307,14 @@ class HLSProxyPagesMixin:
                 "/license": "Proxy licenze DRM (ClearKey/Widevine) - ?url=<URL> o ?clearkey=<id:key>",
                 "/info": "Pagina HTML con informazioni sul server",
                 "/api/info": "Endpoint JSON con informazioni sul server",
-                "/api/sidecar/memory": "RAM del sidecar Toastflix e dei suoi processi figli",
+                "/api/dual/memory": "RAM usata dal servizio DUAL integrato",
+                "/dual/menifest.m3u8": "Master HLS DUAL video + audio sincronizzato - ?d=<Base64 JSON>",
+                "/dual/manifest.m3u8": "Alias corretto del master HLS DUAL - ?d=<Base64 JSON>",
+                "/dual/sync/links": "Test DUAL JSON per sincronizzare video e audio",
+                "/dual/cache/status": "Controlla solo se l'offset DUAL è già nel database SQLite",
+                "/dual/aud/{hid}/audio.m3u8": "Playlist audio DUAL sincronizzata",
+                "/dual/aud/{hid}/init.mp4": "Init segment audio DUAL",
+                "/dual/aud/{hid}/s{idx}.m4s": "Segmento audio DUAL",
             },
             "usage_examples": {
                 "proxy_hls": "/proxy/hls/manifest.m3u8?d=https://example.com/stream.m3u8",
@@ -314,6 +322,7 @@ class HLSProxyPagesMixin:
                 "aes_key": "/key?key_url=https://server.com/key.bin",  # ✅ NUOVO
                 "playlist": "/playlist?url=http://example.com/playlist1.m3u8;http://example.com/playlist2.m3u8",
                 "custom_headers": "/proxy/hls/manifest.m3u8?d=<URL>&h_Authorization=Bearer%20token",
+                "dual_hls": "/dual/menifest.m3u8?d=<Base64URL(JSON)> [&api_password=<PASSWORD>]",
             },
         }
         return web.json_response(info)
@@ -340,15 +349,56 @@ class HLSProxyPagesMixin:
             "info": {
                 "title": "EasyProxy API",
                 "version": version,
-                "description": (
-                    "Interactive documentation for EasyProxy. "
-                    "Includes HLS/MPD proxying, extractor endpoints, key and license helpers, "
-                    "playlist generation, admin API, DVR/recording management, "
-                    "and compatibility endpoints inspired by MediaFlow Proxy."
+                    "description": (
+                        "Interactive documentation for EasyProxy. "
+                        "Includes HLS/MPD proxying, extractor endpoints, key and license helpers, "
+                        "playlist generation, admin API, DVR/recording management, "
+                        "DUAL video/audio synchronization with VLC HLS master generation, "
+                        "and compatibility endpoints inspired by MediaFlow Proxy."
                 ),
             },
             "servers": [{"url": server_url}],
-            "components": {"securitySchemes": security_schemes},
+            "components": {
+                "securitySchemes": security_schemes,
+                "schemas": {
+                    "DualSource": {
+                        "type": "object",
+                        "description": "Direct URL or extractor source. Use url for a direct manifest, or extractor + d for an extractor page.",
+                        "properties": {
+                            "url": {"type": "string", "format": "uri"},
+                            "extractor": {"type": "string", "example": "vixsrc"},
+                            "d": {"type": "string", "format": "uri"},
+                            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                            "warp_off": {"type": "boolean", "default": False},
+                            "proxy_off": {"type": "boolean", "default": False},
+                            "proxy": {"type": "string", "description": "Optional forced proxy URL or off."},
+                        },
+                    },
+                    "DualSyncRequest": {
+                        "type": "object",
+                        "required": ["video", "audio", "audio_lang"],
+                        "properties": {
+                            "video": {"$ref": "#/components/schemas/DualSource"},
+                            "audio": {"$ref": "#/components/schemas/DualSource"},
+                            "audio_lang": {
+                                "type": "string",
+                                "description": "HLS LANGUAGE code or NAME alias.",
+                                "enum": ["ita", "eng", "spa", "fra", "deu", "hin", "rus", "it", "en", "es", "fr", "de", "hi", "ru"],
+                                "example": "ita",
+                            },
+                            "resolution": {"type": "integer", "enum": [720, 1080, 1440, 2160], "description": "Optional override. Omit it to select the highest available video quality automatically.", "example": 2160},
+                            "reference_audio_url": {"type": "string", "format": "uri"},
+                            "media_key": {"type": "string"},
+                            "video_fingerprint": {"type": "string"},
+                        },
+                        "example": {
+                            "video": {"url": "https://info.movieboxnoob.cc/playlist/ZgRENwVpICUbvjgdTAAjvA.m3u8"},
+                            "audio": {"extractor": "vixsrc", "d": "https://vixsrc.to/movie/1339713/"},
+                            "audio_lang": "ita",
+                        },
+                    },
+                },
+            },
             "paths": {
 
                 # --- System & Public ---
@@ -360,14 +410,104 @@ class HLSProxyPagesMixin:
                         "responses": {"200": {"description": "Server information JSON"}},
                     }
                 },
-                "/api/sidecar/memory": {
+                "/api/dual/memory": {
                     "get": {
-                        "summary": "Sidecar memory usage",
-                        "description": "Returns RSS used by the Toastflix sidecar and any child processes it spawned, such as FFmpeg.",
+                        "summary": "DUAL memory usage",
+                        "description": "Returns RSS used by the in-process DUAL service and its active audio tracks.",
                         "responses": {
-                            "200": {"description": "Sidecar memory usage JSON"},
-                            "503": {"description": "Sidecar support is unavailable"},
+                            "200": {"description": "DUAL memory usage JSON"},
+                            "401": {"description": "Invalid API password"},
                         },
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/menifest.m3u8": {
+                    "get": {
+                        "summary": "DUAL HLS master",
+                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
+                        "parameters": [
+                            {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
+                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {
+                            "200": {"description": "Combined HLS master playlist", "content": {"application/vnd.apple.mpegurl": {"schema": {"type": "string"}}}},
+                            "400": {"description": "Invalid Base64 JSON descriptor or source"},
+                            "401": {"description": "Invalid API password"},
+                            "409": {"description": "Video/audio synchronization failed"},
+                            "502": {"description": "Extraction or upstream failure"},
+                        },
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/manifest.m3u8": {
+                    "get": {
+                        "summary": "DUAL HLS master (correct alias)",
+                        "description": "Alias of /dual/menifest.m3u8 with the correctly spelled manifest path.",
+                        "parameters": [
+                            {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
+                            {"name": "api_password", "in": "query", "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Combined HLS master playlist"}, "400": {"description": "Invalid descriptor"}, "401": {"description": "Invalid API password"}, "409": {"description": "Synchronization failed"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/sync/links": {
+                    "post": {
+                        "summary": "Sync direct or extracted video/audio links",
+                        "description": "Resolves the two sources, selects the requested HLS audio language/NAME alias, prepares audio in memory, calculates the offset, and returns the synchronized result as JSON.",
+                        "requestBody": {
+                            "required": True,
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DualSyncRequest"}}},
+                        },
+                        "responses": {
+                            "200": {"description": "Synchronization result"},
+                            "400": {"description": "Invalid source or language"},
+                            "401": {"description": "Invalid API password"},
+                            "409": {"description": "Synchronization failed"},
+                            "502": {"description": "Extraction or upstream failure"},
+                        },
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/aud/{hid}/audio.m3u8": {
+                    "get": {
+                        "summary": "Serve synchronized audio playlist",
+                        "description": "Returns the generated fragmented MP4 audio playlist with the requested offset and playback rate.",
+                        "parameters": [
+                            {"name": "hid", "in": "path", "required": True, "schema": {"type": "string"}},
+                            {"name": "o", "in": "query", "schema": {"type": "integer", "default": 0}, "description": "Offset in milliseconds."},
+                            {"name": "r", "in": "query", "schema": {"type": "integer", "default": 1000000000}, "description": "Playback rate in nano-units."},
+                            {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "responses": {"200": {"description": "Audio HLS playlist"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Audio session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/aud/{hid}/init.mp4": {
+                    "get": {
+                        "summary": "Serve audio fragmented MP4 init",
+                        "description": "Returns the initialization fragment for the active DUAL audio track.",
+                        "parameters": [{"name": "hid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "MP4 initialization fragment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Audio session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/aud/{hid}/s{idx}.m4s": {
+                    "get": {
+                        "summary": "Serve audio fragmented MP4 segment",
+                        "description": "Returns one active DUAL audio segment after applying the requested offset/rate.",
+                        "parameters": [{"name": "hid", "in": "path", "required": True, "schema": {"type": "string"}}, {"name": "idx", "in": "path", "required": True, "schema": {"type": "integer"}}, {"name": "o", "in": "query", "schema": {"type": "integer"}}, {"name": "r", "in": "query", "schema": {"type": "integer"}}, {"name": "t", "in": "query", "required": True, "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "Audio segment"}, "401": {"description": "Invalid DUAL session"}, "410": {"description": "Audio session expired"}},
+                        **({"security": security} if requires_password else {}),
+                    }
+                },
+                "/dual/cache/status": {
+                    "post": {
+                        "summary": "Check cached DUAL offset",
+                        "description": "Returns only whether the requested video/audio offset exists in the SQLite database. Audio is not exposed as a persistent cache.",
+                        "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object"}}}},
+                        "responses": {"200": {"description": "Offset cache status JSON"}, "400": {"description": "Missing media key, resolution or fingerprint"}, "401": {"description": "Invalid API password"}},
+                        **({"security": security} if requires_password else {}),
                     }
                 },
                 "/health": {

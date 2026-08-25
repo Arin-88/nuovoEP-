@@ -1042,6 +1042,27 @@
                     </tbody>
                 </table>
 
+                <div class="table-section-title">&#x2728; DUAL Video + Audio</div>
+                <p class="endpoint-description">
+                    DUAL crea un manifest HLS unico con video e audio sincronizzato. Il servizio è integrato nel processo EasyProxy; non usa un sidecar separato. La prima richiesta può richiedere tempo per estrazione, preparazione audio e sincronizzazione.
+                </p>
+                <table class="api-table">
+                    <thead>
+                        <tr><th width="100">Method</th><th>Endpoint</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/menifest.m3u8?d=&lt;BASE64_JSON&gt;</code></td><td>Master HLS DUAL con video e audio sincronizzato</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/manifest.m3u8?d=&lt;BASE64_JSON&gt;</code></td><td>Alias corretto del manifest DUAL</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/dual/sync/links</code></td><td>Test JSON: risolve video/audio e restituisce risultato di sincronizzazione</td></tr>
+                        <tr><td><span class="endpoint-method method-post">POST</span></td><td><code>/dual/cache/status</code></td><td>Controlla solo la cache dell’offset DUAL</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/audio.m3u8</code></td><td>Playlist audio convertita e servita dal proxy</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/init.mp4</code></td><td>Segmento iniziale audio fMP4</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/dual/aud/&lt;hid&gt;/s&lt;idx&gt;.m4s</code></td><td>Segmento audio fMP4</td></tr>
+                        <tr><td><span class="endpoint-method method-get">GET</span></td><td><code>/api/dual/memory</code></td><td>Memoria e tracce audio DUAL attive</td></tr>
+                    </tbody>
+                </table>
+                <div class="example-block">Payload d (prima di Base64 URL-safe): {"video":{"url":"https://example.com/video.m3u8"},"audio":{"extractor":"vixsrc","d":"https://vixsrc.to/movie/1339713/"},"audio_lang":"ita"}</div>
+
                 <div class="table-section-title">&#x1F4FA; Proxy &amp; Streaming</div>
                 <table class="api-table">
                     <thead>

@@ -1,4 +1,4 @@
-"""Resolve sidecar outbound routing with EasyProxy's live configuration."""
+"""Resolve DUAL outbound routing with EasyProxy's live configuration."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ _last_config_refresh = 0.0
 
 
 def _refresh_live_config() -> None:
-    """Refresh admin settings in the long-lived sidecar process."""
+    """Refresh admin settings used by the in-process DUAL service."""
     global _last_config_refresh
     now = time.monotonic()
     if now - _last_config_refresh < _CONFIG_REFRESH_SECONDS:

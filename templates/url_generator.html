@@ -590,6 +590,7 @@
         <div class="tabs">
             <button class="tab-btn active" data-tab="proxy">Proxy URL</button>
             <button class="tab-btn" data-tab="extractor">Extractor URL</button>
+            <button class="tab-btn" data-tab="dual">DUAL</button>
             <button class="tab-btn" data-tab="batch">Batch Generate</button>
         </div>
 
@@ -772,6 +773,78 @@
             </div>
         </div>
 
+        <!-- DUAL URL Tab -->
+        <div id="panel-dual" class="tab-panel">
+            <div class="glass-card">
+                <p style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:1rem;line-height:1.6;">
+                    Crea un unico manifest HLS con video e audio sincronizzato, compatibile con i player HLS. Il parametro <code style="color:var(--accent-primary);font-family:monospace;">d</code> contiene il payload JSON in Base64 URL-safe. La qualità video più alta viene scelta automaticamente.
+                </p>
+                <div class="form-group">
+                    <label>Video URL</label>
+                    <input id="dualVideoUrl" type="url" placeholder="https://example.com/video.m3u8">
+                </div>
+                <div class="form-group">
+                    <label>Video extractor (optional)</label>
+                    <div style="display:grid;gap:10px;grid-template-columns:minmax(0,1fr) 200px;">
+                        <input id="dualVideoExtractor" type="text" placeholder="Leave empty for a direct video URL">
+                        <select id="dualVideoExtractorSelect">
+                            <option value="">Select extractor</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Audio page / URL</label>
+                    <input id="dualAudioUrl" type="url" placeholder="https://vixsrc.to/movie/1339713/">
+                </div>
+                <div class="form-group">
+                    <label>Audio extractor (optional)</label>
+                    <div style="display:grid;gap:10px;grid-template-columns:minmax(0,1fr) 200px;">
+                        <input id="dualAudioExtractor" type="text" value="vixsrc" placeholder="Leave empty for a direct audio URL">
+                        <select id="dualAudioExtractorSelect">
+                            <option value="">Select extractor</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Audio language</label>
+                    <select id="dualAudioLanguage">
+                        <option value="ita">Italian</option>
+                        <option value="eng">English</option>
+                        <option value="spa">Spanish</option>
+                        <option value="fra">French</option>
+                        <option value="deu">German</option>
+                        <option value="hin">Hindi</option>
+                        <option value="rus">Russian</option>
+                    </select>
+                    <div class="form-hint">EasyProxy sceglie automaticamente la traccia migliore disponibile per la lingua selezionata.</div>
+                </div>
+                <div class="checkbox-grid">
+                    <label class="checkbox-label">
+                        <input id="dualVideoWarpOff" type="checkbox">
+                        <div><span>Video <code>warp=off</code></span><div class="checkbox-desc">Bypass WARP for the video source.</div></div>
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="dualVideoProxyOff" type="checkbox">
+                        <div><span>Video <code>proxy=off</code></span><div class="checkbox-desc">Bypass configured proxies for the video source.</div></div>
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="dualAudioWarpOff" type="checkbox">
+                        <div><span>Audio <code>warp=off</code></span><div class="checkbox-desc">Bypass WARP for the audio source.</div></div>
+                    </label>
+                    <label class="checkbox-label">
+                        <input id="dualAudioProxyOff" type="checkbox">
+                        <div><span>Audio <code>proxy=off</code></span><div class="checkbox-desc">Bypass configured proxies for the audio source.</div></div>
+                    </label>
+                </div>
+                <div class="btn-row">
+                    <button id="copyDualResult" class="btn btn-secondary">Copy URL</button>
+                    <button id="playDualResult" class="btn btn-primary" style="display: none; background: var(--secondary-gradient);">▶️ Test Stream</button>
+                </div>
+                <textarea id="dualResult" class="result-area" readonly rows="7" placeholder="Generated DUAL URL will appear here..."></textarea>
+                <div class="form-hint" style="margin-top:0.8rem;">First playback may take time because EasyProxy extracts the audio and calculates synchronization. The endpoint is <code>/dual/menifest.m3u8</code>.</div>
+            </div>
+        </div>
+
         <!-- Batch Generate Tab -->
         <div id="panel-batch" class="tab-panel">
             <div class="glass-card">
@@ -870,6 +943,7 @@
         const tabPanels = {
             proxy: document.getElementById('panel-proxy'),
             extractor: document.getElementById('panel-extractor'),
+            dual: document.getElementById('panel-dual'),
             batch: document.getElementById('panel-batch')
         };
 
@@ -889,6 +963,28 @@
             if (e.target.value) {
                 document.getElementById('extractorHost').value = e.target.value;
             }
+        });
+
+        function copyExtractorList(targetId) {
+            const source = document.getElementById('extractorHostSelect');
+            const target = document.getElementById(targetId);
+            Array.from(source.options).slice(1).forEach(option => {
+                target.appendChild(option.cloneNode(true));
+            });
+        }
+
+        copyExtractorList('dualVideoExtractorSelect');
+        copyExtractorList('dualAudioExtractorSelect');
+        document.getElementById('dualAudioExtractorSelect').value = 'vixsrc';
+
+        [
+            ['dualVideoExtractorSelect', 'dualVideoExtractor'],
+            ['dualAudioExtractorSelect', 'dualAudioExtractor']
+        ].forEach(([selectId, inputId]) => {
+            document.getElementById(selectId).addEventListener('change', (event) => {
+                document.getElementById(inputId).value = event.target.value;
+                autoDual();
+            });
         });
 
         function buildBaseUrl() {
@@ -1029,6 +1125,47 @@
             document.getElementById('playExtractorResult').style.display = 'inline-flex';
         }
 
+        function base64UrlEncodeUtf8(value) {
+            const bytes = new TextEncoder().encode(value);
+            let binary = '';
+            bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function generateDualUrl() {
+            const videoUrl = document.getElementById('dualVideoUrl').value.trim();
+            const videoExtractor = document.getElementById('dualVideoExtractor').value.trim();
+            const audioUrl = document.getElementById('dualAudioUrl').value.trim();
+            const audioExtractor = document.getElementById('dualAudioExtractor').value.trim();
+            const audioLanguage = document.getElementById('dualAudioLanguage').value;
+            const apiPassword = document.getElementById('apiPassword').value.trim();
+            const result = document.getElementById('dualResult');
+
+            if (!videoUrl || !audioUrl) {
+                result.value = 'Inserisci Video URL e Audio page/URL.';
+                document.getElementById('playDualResult').style.display = 'none';
+                return;
+            }
+
+            const video = videoExtractor
+                ? { extractor: videoExtractor, d: videoUrl }
+                : { url: videoUrl };
+            const audio = audioExtractor
+                ? { extractor: audioExtractor, d: audioUrl }
+                : { url: audioUrl };
+            if (document.getElementById('dualVideoWarpOff').checked) video.warp_off = true;
+            if (document.getElementById('dualVideoProxyOff').checked) video.proxy_off = true;
+            if (document.getElementById('dualAudioWarpOff').checked) audio.warp_off = true;
+            if (document.getElementById('dualAudioProxyOff').checked) audio.proxy_off = true;
+
+            const payload = { video, audio, audio_lang: audioLanguage };
+            const encoded = base64UrlEncodeUtf8(JSON.stringify(payload));
+            const params = new URLSearchParams({ d: encoded });
+            if (apiPassword) params.set('api_password', apiPassword);
+            result.value = `${buildBaseUrl()}/dual/menifest.m3u8?${params.toString()}`;
+            document.getElementById('playDualResult').style.display = 'inline-flex';
+        }
+
         async function generateBatch() {
             const apiPassword = document.getElementById('apiPassword').value.trim();
             const source = document.getElementById('batchPayload').value.trim();
@@ -1078,10 +1215,12 @@
 
         const proxyInputs = ['proxyEndpoint', 'destinationUrl', 'requestHeaders', 'proxyRedirectStream', 'proxyBypassWarp', 'proxyBypassProxy', 'proxyDisableSSL', 'proxyNativeMpd'];
         const extractorInputs = ['extractorHost', 'extractorUrl', 'extractorExtension', 'extractorRedirectStream', 'extractorBypassWarp', 'extractorBypassProxy', 'extractorDisableSSL'];
+        const dualInputs = ['dualVideoUrl', 'dualVideoExtractor', 'dualVideoExtractorSelect', 'dualAudioUrl', 'dualAudioExtractor', 'dualAudioExtractorSelect', 'dualAudioLanguage', 'dualVideoWarpOff', 'dualVideoProxyOff', 'dualAudioWarpOff', 'dualAudioProxyOff'];
 
         function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
         const autoProxy = debounce(() => { if (document.getElementById('destinationUrl').value.trim()) generateProxyUrl(); }, 300);
         const autoExtractor = debounce(() => { if (document.getElementById('extractorHost').value.trim() && document.getElementById('extractorUrl').value.trim()) generateExtractorUrl(); }, 300);
+        const autoDual = debounce(() => { if (document.getElementById('dualVideoUrl').value.trim() && document.getElementById('dualAudioUrl').value.trim()) generateDualUrl(); }, 300);
 
         proxyInputs.forEach(id => {
             const el = document.getElementById(id);
@@ -1093,10 +1232,16 @@
             el.addEventListener('input', autoExtractor);
             if (el.type === 'checkbox' || el.tagName === 'SELECT') el.addEventListener('change', autoExtractor);
         });
-        document.getElementById('apiPassword').addEventListener('input', () => { autoProxy(); autoExtractor(); });
+        dualInputs.forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('input', autoDual);
+            if (el.type === 'checkbox' || el.tagName === 'SELECT') el.addEventListener('change', autoDual);
+        });
+        document.getElementById('apiPassword').addEventListener('input', () => { autoProxy(); autoExtractor(); autoDual(); });
         document.getElementById('batchPayload').addEventListener('input', debounce(generateBatch, 500));
         document.getElementById('copyProxyResult').addEventListener('click', (e) => copyFrom('proxyResult', e.target));
         document.getElementById('copyExtractorResult').addEventListener('click', (e) => copyFrom('extractorResult', e.target));
+        document.getElementById('copyDualResult').addEventListener('click', (e) => copyFrom('dualResult', e.target));
         document.getElementById('copyBatchResult').addEventListener('click', (e) => copyFrom('batchResult', e.target));
 
         let hlsPlayer = null;
@@ -1206,6 +1351,11 @@
 
         document.getElementById('playExtractorResult').addEventListener('click', () => {
             const url = document.getElementById('extractorResult').value.trim();
+            if (url) openPlayerModal(url);
+        });
+
+        document.getElementById('playDualResult').addEventListener('click', () => {
+            const url = document.getElementById('dualResult').value.trim();
             if (url) openPlayerModal(url);
         });
     </script>

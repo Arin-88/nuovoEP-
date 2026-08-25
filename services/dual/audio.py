@@ -18,7 +18,7 @@ from .routing import RoutingOptions
 class AudioStore:
     """Hold audio metadata in memory and never persist audio fragments.
 
-    The sidecar is used as a personal service, so source audio and generated
+    The DUAL service is used as a personal service, so source audio and generated
     fMP4 fragments are processed per request and removed with their temporary
     working directory. Offset data remains persisted separately by OffsetStore.
     """
@@ -103,8 +103,12 @@ class AudioStore:
         if len(playlist) > 2 * 1024 * 1024 or "#EXTINF" not in playlist:
             raise ValueError("invalid audio playlist")
         language = str(language or "").lower().strip()
-        if language not in {"ita", "eng", "it", "en", "italian", "english"}:
-            raise ValueError("language must be ita or eng")
+        if language not in {
+            "ita", "eng", "spa", "fra", "deu", "hin", "rus",
+            "it", "en", "es", "fr", "de", "hi", "ru",
+            "italian", "english", "spanish", "french", "german", "hindi", "russian",
+        }:
+            raise ValueError("unsupported audio language")
         segments, durations, key_line = self._parse_playlist(playlist, base_url)
         self._validate_segments(segments)
         if len(durations) < len(segments):
@@ -169,7 +173,7 @@ class AudioStore:
         return self._track(hid)["key"]
 
     def find_cached(self, media_key: str, language: str):
-        # Persistent audio reuse is intentionally disabled. Toastflix will
+        # Persistent audio reuse is intentionally disabled. Clients will
         # call /dual/aprep again and receive a fresh in-memory track.
         return None
 
@@ -178,6 +182,11 @@ class AudioStore:
         aliases = {
             "ita": {"ita", "it", "italian", "italiano"},
             "eng": {"eng", "en", "english"},
+            "spa": {"spa", "es", "spanish", "spagnolo"},
+            "fra": {"fra", "fr", "french", "francese"},
+            "deu": {"deu", "de", "ger", "german", "tedesco"},
+            "hin": {"hin", "hi", "hindi"},
+            "rus": {"rus", "ru", "russian", "russo"},
         }
         wanted = aliases.get(str(language or "").lower().strip(), set())
         candidates = [
@@ -353,7 +362,7 @@ class AudioStore:
             item = next((entry for entry in timeline if entry["idx"] == index), None)
             if not item:
                 raise ValueError("audio segment outside timeline")
-            with tempfile.TemporaryDirectory(prefix=f"sidecar-audio-{hid}-") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix=f"dual-audio-{hid}-") as temp_dir:
                 work = Path(temp_dir)
                 await self._download(
                     metadata["segs"][index],

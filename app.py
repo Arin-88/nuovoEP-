@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from services.proxy import HLSProxy
 from config import PORT, RECORDINGS_DIR, APP_VERSION
+from services.dual import service as dual_service
 from services.recording_manager import RecordingManager
-from services.sidecar_manager import SidecarManager
 from routes.recordings import setup_recording_routes
 
 logger = logging.getLogger(__name__)
@@ -30,14 +30,17 @@ def _read_file(path):
 # --- Logica di Avvio ---
 def create_app():
     """Crea e configura l'applicazione aiohttp."""
-    sidecar_cache_dir = os.path.join(RECORDINGS_DIR, "sidecar_data")
-    sidecar_manager = SidecarManager(cache_dir=sidecar_cache_dir)
-    proxy = HLSProxy(sidecar_manager=sidecar_manager)
+    dual_cache_dir = os.path.join(RECORDINGS_DIR, "dual_data")
+    proxy = HLSProxy()
 
-    # Allow rewritten audio playlists to reach the embedded sidecar.
-    app = web.Application(client_max_size=4 * 1024 * 1024)
+    # DUAL is part of the main EasyProxy process; there is no child aiohttp app.
+    app = web.Application(
+        middlewares=[dual_service.dual_middleware],
+        client_max_size=4 * 1024 * 1024,
+    )
     app['proxy'] = proxy
-    app['sidecar_manager'] = sidecar_manager
+    app['dual_service'] = dual_service
+    dual_service.install(app, dual_cache_dir)
 
     # Initialize recording manager for DVR functionality
     recording_manager = RecordingManager(
@@ -109,18 +112,13 @@ def create_app():
     app.router.add_get('/proxy/ip', proxy.handle_proxy_ip)
     # ✅ Health check endpoint
     app.router.add_get('/health', lambda r: web.json_response({"status": "ok", "version": APP_VERSION}))
-    app.router.add_get('/api/sidecar/memory', proxy.handle_sidecar_memory)
+    app.router.add_get('/api/dual/memory', dual_service.handle_memory)
+    # Backward-compatible alias for existing monitoring clients.
+    app.router.add_get('/api/sidecar/memory', dual_service.handle_memory)
 
-    # Toastflix aiohttp sidecar, kept private and exposed through this process.
-    app.router.add_route('*', '/sidecar', proxy.handle_sidecar_request)
-    app.router.add_route('*', '/sidecar/{tail:.*}', proxy.handle_sidecar_request)
-
-    # Root aliases for Toastflix clients that append /session, /dual, etc.
-    # directly to the configured EasyProxy base URL.
-    app.router.add_route('*', '/session', proxy.handle_sidecar_root_request)
-    app.router.add_route('*', '/dual/{tail:.*}', proxy.handle_sidecar_root_request)
-    app.router.add_route('*', '/offset/{tail:.*}', proxy.handle_sidecar_root_request)
-    app.router.add_route('*', '/sync', proxy.handle_sidecar_root_request)
+    app.router.add_post('/dual/sync/links', proxy.handle_dual_sync_links)
+    app.router.add_get('/dual/menifest.m3u8', proxy.handle_dual_server_m3u8)
+    app.router.add_get('/dual/manifest.m3u8', proxy.handle_dual_server_m3u8)
 
     # Admin Panel
     app.router.add_get('/admin', proxy.handle_admin)
@@ -146,17 +144,12 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        # The sidecar is started lazily by the first /sidecar request and is
-        # stopped after a short idle grace period without activity.
         asyncio.create_task(proxy.start_tasks())
         asyncio.create_task(recording_manager.cleanup_loop())
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app):
-        try:
-            await recording_manager.shutdown()
-        finally:
-            await sidecar_manager.stop()
+        await recording_manager.shutdown()
     app.on_shutdown.append(on_shutdown)
     
     return app

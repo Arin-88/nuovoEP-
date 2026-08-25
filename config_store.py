@@ -63,7 +63,7 @@ def _load():
                             combined.append(item)
                     merged[list_key] = combined
             _config_data = merged
-            logger.info("Loaded config from %s", _CONFIG_FILE)
+            logger.debug("Loaded config from %s", _CONFIG_FILE)
             return
         except Exception as e:
             logger.warning("Failed to load config.json: %s", e)
