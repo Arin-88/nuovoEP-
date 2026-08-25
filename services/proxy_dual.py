@@ -57,7 +57,7 @@ _LANGUAGE_ALIASES = {
     "rus": {"ru", "rus", "russian", "russo", "russian 5.1 (dd+)"},
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
-_DUAL_ERROR_DURATION = 6
+_DUAL_ERROR_DURATION = 8
 _DUAL_ERROR_MESSAGES = {
     "audio": (
         "REQUESTED AUDIO TRACK NOT FOUND",
@@ -99,7 +99,7 @@ def _ffmpeg_filter_escape(value: str) -> str:
 
 
 def _generate_dual_error_segment(kind: str) -> bytes:
-    """Generate one short, widely compatible H.264/AAC MPEG-TS segment."""
+    """Generate one short baseline H.264/AAC MPEG-TS segment for HLS players."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("FFmpeg is required to generate the DUAL error video")
@@ -108,18 +108,21 @@ def _generate_dual_error_segment(kind: str) -> bytes:
     font = _dual_font_file()
     font_clause = f"fontfile='{_ffmpeg_filter_escape(font)}':" if font else ""
     drawtext = ",".join([
-        f"drawtext={font_clause}text='{title}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=285:box=1:boxcolor=0x111827CC:boxborderw=18",
-        f"drawtext={font_clause}text='{subtitle}':fontcolor=0xCBD5E1:fontsize=27:x=(w-text_w)/2:y=375",
+        f"drawtext={font_clause}text='{title}':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=135:box=1:boxcolor=0x111827CC:boxborderw=12",
+        f"drawtext={font_clause}text='{subtitle}':fontcolor=0xCBD5E1:fontsize=18:x=(w-text_w)/2:y=205",
     ])
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-f", "lavfi", "-i", "color=c=0x111827:s=1280x720:r=25",
-        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-f", "lavfi", "-i", "color=c=0x111827:s=640x360:r=30",
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         "-t", str(_DUAL_ERROR_DURATION), "-vf", drawtext,
         "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast",
-        "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "25",
-        "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
-        "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
+        "-profile:v", "baseline", "-level:v", "3.0", "-tune", "stillimage",
+        "-pix_fmt", "yuv420p", "-r", "30", "-bf", "0", "-refs", "1",
+        "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+        "-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
+        "-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers",
         "-f", "mpegts", "pipe:1",
     ]
     completed = subprocess.run(
@@ -669,13 +672,16 @@ class HLSProxyDualMixin:
                 status=502,
             )
 
-        segment_url = f"{get_public_base_url(request)}/dual/error/{kind}.ts"
+        # Root-relative: the manifest can be returned by /dual/menifest.m3u8
+        # or /dual/error/{kind}.m3u8, but the segment always lives under /dual/error/.
+        segment_url = f"/dual/error/{kind}.ts"
         api_password = request.query.get("api_password")
         if api_password:
             segment_url = f"{segment_url}?{urllib.parse.urlencode({'api_password': api_password})}"
         manifest = "\n".join([
             "#EXTM3U",
             "#EXT-X-VERSION:3",
+            "#EXT-X-INDEPENDENT-SEGMENTS",
             f"#EXT-X-TARGETDURATION:{_DUAL_ERROR_DURATION}",
             "#EXT-X-PLAYLIST-TYPE:VOD",
             "#EXT-X-MEDIA-SEQUENCE:0",

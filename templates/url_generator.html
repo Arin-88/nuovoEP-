@@ -1305,13 +1305,19 @@
             
             if (isHls) {
                 if (Hls.isSupported()) {
+                    const isDual = streamUrl.toLowerCase().includes('/dual/');
                     hlsPlayer = new Hls({
                         maxBufferLength: 30,
                         maxMaxBufferLength: 120,
                         startFragPrefetch: true,
                         enableWorker: true,
                         lowLatencyMode: false,
-                        backBufferLength: 90
+                        backBufferLength: 90,
+                        // DUAL builds the manifest synchronously while it extracts
+                        // and measures the audio; do not abort the test too early.
+                        manifestLoadingTimeOut: isDual ? 180000 : 10000,
+                        manifestLoadingMaxRetry: isDual ? 1 : 2,
+                        manifestLoadingRetryDelay: isDual ? 1000 : 1000
                     });
                     hlsPlayer.loadSource(streamUrl);
                     hlsPlayer.attachMedia(video);
