@@ -378,7 +378,14 @@ class SyncEngine:
         common = min(video_duration, reference_duration, audio_duration)
         if common < 90:
             raise ValueError("media too short")
-        positions = sorted({min(60.0, common * .1), common * .5, max(30.0, common - 90.0)})
+        positions = sorted({
+            min(60.0, common * .1),
+            common * .2,
+            common * .4,
+            common * .6,
+            common * .8,
+            max(30.0, common - 90.0),
+        })
         measurements = []
         with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
             root = Path(directory)
@@ -405,11 +412,12 @@ class SyncEngine:
                     raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
                 lag, correlation = self._lag(self._envelope(video_pcm), self._envelope(audio_pcm))
                 measurements.append({"position": position, "lag": lag, "offset": lag, "correlation": correlation})
-        # Two consistent samples are enough when the third sample is a failed
-        # or low-correlation decode. The offset deviation check below remains
+        # Require a quorum across the timeline. Some valid scenes have little
+        # audio signal and produce low correlation; rejecting those alone made
+        # otherwise stable sources fail. The offset deviation check remains
         # strict, so unrelated editions still stay incompatible.
         valid = [item for item in measurements if item["correlation"] >= .70]
-        if len(valid) < 2:
+        if len(valid) < 3:
             result = {"status": "incompatible", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
         else:
             measured = statistics.median(item["offset"] for item in valid)
