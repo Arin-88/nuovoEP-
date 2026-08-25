@@ -1364,7 +1364,11 @@
 
         document.getElementById('playDualResult').addEventListener('click', () => {
             const url = document.getElementById('dualResult').value.trim();
-            if (url) openPlayerModal(url);
+            if (url) {
+                const testUrl = new URL(url, window.location.href);
+                testUrl.searchParams.set('web_test', '1');
+                openPlayerModal(testUrl.toString());
+            }
         });
     </script>
 

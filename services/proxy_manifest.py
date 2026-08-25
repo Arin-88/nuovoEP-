@@ -109,6 +109,19 @@ class HLSProxyManifestHandlerMixin:
                     header_name = param_name[2:]
                     combined_headers[header_name] = param_value
 
+            # DUAL's browser test already resolved the final media URL and its
+            # required headers. Do not run GenericHLSExtractor again: providers
+            # can reject the Referer it guesses even though the raw URL works.
+            if request.query.get("direct_hls") == "1":
+                return await self._proxy_stream(
+                    request,
+                    target_url,
+                    combined_headers,
+                    bypass_warp=bypass_warp,
+                    forced_proxy=selected_proxy,
+                    force_direct=force_direct,
+                )
+
             extractor_key = None
             captured_manifest = None
             is_rewritten_hls_segment = request.path.startswith("/proxy/hls/segment.")

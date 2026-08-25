@@ -601,6 +601,29 @@ class HLSProxyDualMixin:
         return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
     @staticmethod
+    def _web_test_video_url(request, video_url: str, video: dict) -> str:
+        params = {
+            "url": video_url,
+            "redirect_stream": "true",
+            "direct_hls": "1",
+        }
+        for name, value in (video.get("headers") or {}).items():
+            params[f"h_{name}"] = value
+        if video.get("warp_off"):
+            params["warp"] = "off"
+        if video.get("proxy_off"):
+            params["proxy"] = "off"
+        elif video.get("forced_proxy"):
+            params["proxy"] = video["forced_proxy"]
+        api_password = request.query.get("api_password")
+        if api_password:
+            params["api_password"] = api_password
+        return (
+            f"{get_public_base_url(request)}/proxy/hls/manifest.m3u8?"
+            f"{urllib.parse.urlencode(params)}"
+        )
+
+    @staticmethod
     def _dual_master(result: dict) -> str:
         resolution = int(result["resolution"])
         width = max(2, round(resolution * 16 / 9))
@@ -859,6 +882,8 @@ class HLSProxyDualMixin:
         }
         if bridge_used:
             result["sync_bridge"] = "eng"
+        if str(request.query.get("web_test") or "").lower() in {"1", "true"}:
+            result["video_url"] = self._web_test_video_url(request, video_url, video)
         result["m3u8"] = self._dual_master(result)
         return result
 
