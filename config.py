@@ -8,7 +8,12 @@ import asyncio
 import contextvars
 import urllib.request
 from dotenv import load_dotenv
-from config_store import get as _cfg_get, set as _cfg_set, get_all as _cfg_get_all
+from config_store import (
+    DEFAULT_RECORDINGS_DIR,
+    get as _cfg_get,
+    set as _cfg_set,
+    get_all as _cfg_get_all,
+)
 from aiohttp_socks import (
     ProxyError as AioProxyError,
     ProxyConnectionError as AioProxyConnectionError,
@@ -30,7 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.10.4"
+APP_VERSION = "2.11.0"
 
 
 def get_extractor_proxies(extractor_name: str) -> list:
@@ -829,7 +834,7 @@ def reload_config():
     mod.GLOBAL_PROXIES = _get_dynamic_global_proxies()
     mod.TRANSPORT_ROUTES = _get_dynamic_transport_routes()
     mod.DVR_ENABLED = _cfg_get("dvr_enabled", False)
-    mod.RECORDINGS_DIR = _cfg_get("recordings_dir", "/data/recordings")
+    mod.RECORDINGS_DIR = _cfg_get("recordings_dir", DEFAULT_RECORDINGS_DIR)
     mod.MAX_RECORDING_DURATION = _cfg_get("max_recording_duration", 28800)
     mod.RECORDINGS_RETENTION_DAYS = _cfg_get("recordings_retention_days", 7)
     mod.PROXY_TEST_TIMEOUT = _cfg_get("proxy_test_timeout", 10)
@@ -859,7 +864,7 @@ def __getattr__(name):
         "GLOBAL_PROXIES": _get_dynamic_global_proxies,
         "TRANSPORT_ROUTES": _get_dynamic_transport_routes,
         "DVR_ENABLED": lambda: _cfg_get("dvr_enabled", False),
-        "RECORDINGS_DIR": lambda: _cfg_get("recordings_dir", "/data/recordings"),
+        "RECORDINGS_DIR": lambda: _cfg_get("recordings_dir", DEFAULT_RECORDINGS_DIR),
         "MAX_RECORDING_DURATION": lambda: _cfg_get("max_recording_duration", 28800),
         "RECORDINGS_RETENTION_DAYS": lambda: _cfg_get("recordings_retention_days", 7),
         "WARP_LICENSE_KEY": lambda: _cfg_get("warp_license_key", ""),
@@ -875,7 +880,7 @@ def __getattr__(name):
 
 def get_system_stats():
     # Disk Usage
-    rec_dir = _cfg_get("recordings_dir", "/data/recordings")
+    rec_dir = _cfg_get("recordings_dir", DEFAULT_RECORDINGS_DIR)
     try:
         os.makedirs(rec_dir, exist_ok=True)
         disk_total, disk_used, disk_free = shutil.disk_usage(rec_dir)

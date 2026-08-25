@@ -5,8 +5,16 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_DIR = os.environ.get("CONFIG_DIR", "/data")
+# Docker keeps its persistent volume at /data.  Native Windows runs should
+# keep the same layout inside the EasyProxy checkout instead of writing to
+# the drive root (C:\data).
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_CONFIG_DIR = (
+    os.path.join(_PROJECT_DIR, "data") if os.name == "nt" else "/data"
+)
+_CONFIG_DIR = os.environ.get("CONFIG_DIR") or _DEFAULT_CONFIG_DIR
 _CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.json")
+DEFAULT_RECORDINGS_DIR = os.path.join(_CONFIG_DIR, "recordings")
 
 DEFAULT_CONFIG = {
     "enable_warp": False,
@@ -33,7 +41,7 @@ DEFAULT_CONFIG = {
     "proxy_off_extractors": [],
     "proxy_exclude_domains": [],
     "dvr_enabled": False,
-    "recordings_dir": "/data/recordings",
+    "recordings_dir": DEFAULT_RECORDINGS_DIR,
     "max_recording_duration": 28800,
     "recordings_retention_days": 7,
     "proxy_test_timeout": 10,
@@ -63,7 +71,7 @@ def _load():
                             combined.append(item)
                     merged[list_key] = combined
             _config_data = merged
-            logger.info("Loaded config from %s", _CONFIG_FILE)
+            logger.debug("Loaded config from %s", _CONFIG_FILE)
             return
         except Exception as e:
             logger.warning("Failed to load config.json: %s", e)
