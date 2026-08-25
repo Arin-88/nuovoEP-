@@ -794,12 +794,12 @@
                 </div>
                 <div class="form-group">
                     <label>Audio page / URL</label>
-                    <input id="dualAudioUrl" type="url" placeholder="https://vixsrc.to/movie/1339713/">
+                    <input id="dualAudioUrl" type="url" placeholder="https://example.com/audio.m3u8">
                 </div>
                 <div class="form-group">
                     <label>Audio extractor (optional)</label>
                     <div style="display:grid;gap:10px;grid-template-columns:minmax(0,1fr) 200px;">
-                        <input id="dualAudioExtractor" type="text" value="vixsrc" placeholder="Leave empty for a direct audio URL">
+                        <input id="dualAudioExtractor" type="text" placeholder="Leave empty for a direct audio URL">
                         <select id="dualAudioExtractorSelect">
                             <option value="">Select extractor</option>
                         </select>
@@ -981,7 +981,6 @@
 
         copyExtractorList('dualVideoExtractorSelect');
         copyExtractorList('dualAudioExtractorSelect');
-        document.getElementById('dualAudioExtractorSelect').value = 'vixsrc';
 
         [
             ['dualVideoExtractorSelect', 'dualVideoExtractor'],
