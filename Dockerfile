@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloudflare-warp \
     netcat-openbsd \
     ffmpeg \
+    fonts-dejavu \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

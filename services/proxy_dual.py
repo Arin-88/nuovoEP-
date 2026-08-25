@@ -6,7 +6,10 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import urllib.parse
 from typing import Any
 from urllib.parse import urljoin
@@ -20,6 +23,7 @@ from services.proxy_shared import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     ClientTimeout,
+    get_public_base_url,
     logger,
     web,
 )
@@ -53,6 +57,83 @@ _LANGUAGE_ALIASES = {
     "rus": {"ru", "rus", "russian", "russo", "russian 5.1 (dd+)"},
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
+_DUAL_ERROR_DURATION = 6
+_DUAL_ERROR_MESSAGES = {
+    "audio": (
+        "REQUESTED AUDIO TRACK NOT FOUND",
+        "Try another language or source.",
+    ),
+    "sync": (
+        "AUDIO/VIDEO SYNC UNAVAILABLE",
+        "Synchronization is not possible for this source.",
+    ),
+}
+
+
+def _dual_error_kind(error: BaseException) -> str | None:
+    """Map expected DUAL failures to a playable error-video category."""
+    status = int(getattr(error, "status", 0) or 0)
+    message = str(getattr(error, "message", "") or error).lower()
+    if status == 409 or any(
+        marker in message
+        for marker in ("sync", "synchron", "incompatible", "offset")
+    ):
+        return "sync"
+    if "audio" in message and status in {0, 400, 404, 410, 422, 502}:
+        return "audio"
+    return None
+
+
+def _dual_font_file() -> str | None:
+    candidates = (
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf"),
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    )
+    return next((path for path in candidates if os.path.isfile(path)), None)
+
+
+def _ffmpeg_filter_escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _generate_dual_error_segment(kind: str) -> bytes:
+    """Generate one short, widely compatible H.264/AAC MPEG-TS segment."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg is required to generate the DUAL error video")
+
+    title, subtitle = _DUAL_ERROR_MESSAGES[kind]
+    font = _dual_font_file()
+    font_clause = f"fontfile='{_ffmpeg_filter_escape(font)}':" if font else ""
+    drawtext = ",".join([
+        f"drawtext={font_clause}text='{title}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=285:box=1:boxcolor=0x111827CC:boxborderw=18",
+        f"drawtext={font_clause}text='{subtitle}':fontcolor=0xCBD5E1:fontsize=27:x=(w-text_w)/2:y=375",
+    ])
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "lavfi", "-i", "color=c=0x111827:s=1280x720:r=25",
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-t", str(_DUAL_ERROR_DURATION), "-vf", drawtext,
+        "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast",
+        "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "25",
+        "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
+        "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
+        "-f", "mpegts", "pipe:1",
+    ]
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0 or not completed.stdout:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"FFmpeg error video generation failed: {detail[-400:]}")
+    return completed.stdout
 
 
 def _normalise_language(value: Any) -> str:
@@ -430,6 +511,98 @@ class HLSProxyDualMixin:
             "",
         ])
 
+    async def _dual_error_segment(self, kind: str) -> bytes:
+        if kind not in _DUAL_ERROR_MESSAGES:
+            raise ValueError("unknown DUAL error video")
+        cache = getattr(self, "_dual_error_segments", None)
+        lock = getattr(self, "_dual_error_lock", None)
+        if cache is None or lock is None:
+            raise RuntimeError("DUAL error video cache is not initialized")
+        if kind not in cache:
+            async with lock:
+                if kind not in cache:
+                    cache[kind] = await asyncio.to_thread(
+                        _generate_dual_error_segment, kind
+                    )
+        return cache[kind]
+
+    async def _dual_error_manifest(self, request, kind: str) -> web.Response:
+        try:
+            await self._dual_error_segment(kind)
+        except Exception as exc:
+            logger.error("DUAL error video unavailable: %s", exc)
+            return web.json_response(
+                {
+                    "status": "error",
+                    "detail": "DUAL error video unavailable; FFmpeg is required",
+                },
+                status=502,
+            )
+
+        segment_url = f"{get_public_base_url(request)}/dual/error/{kind}.ts"
+        api_password = request.query.get("api_password")
+        if api_password:
+            segment_url = f"{segment_url}?{urllib.parse.urlencode({'api_password': api_password})}"
+        manifest = "\n".join([
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            f"#EXT-X-TARGETDURATION:{_DUAL_ERROR_DURATION}",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            f"#EXTINF:{_DUAL_ERROR_DURATION}.000,",
+            segment_url,
+            "#EXT-X-ENDLIST",
+            "",
+        ])
+        return web.Response(
+            text=manifest,
+            content_type="application/vnd.apple.mpegurl",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    async def handle_dual_error_m3u8(self, request):
+        """Return a short playable HLS video explaining an expected DUAL failure."""
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized: Invalid API Password")
+        kind = str(request.match_info.get("kind") or "").lower()
+        if kind not in _DUAL_ERROR_MESSAGES:
+            return web.Response(status=404, text="Unknown DUAL error video")
+        if request.method == "HEAD":
+            return web.Response(
+                content_type="application/vnd.apple.mpegurl",
+                headers={"Cache-Control": "no-store"},
+            )
+        return await self._dual_error_manifest(request, kind)
+
+    async def handle_dual_error_segment(self, request):
+        """Serve the cached MPEG-TS segment used by the DUAL error HLS video."""
+        if not check_password(request):
+            return web.Response(status=401, text="Unauthorized: Invalid API Password")
+        kind = str(request.match_info.get("kind") or "").lower()
+        if kind not in _DUAL_ERROR_MESSAGES:
+            return web.Response(status=404, text="Unknown DUAL error video")
+        if request.method == "HEAD":
+            return web.Response(
+                content_type="video/mp2t",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            segment = await self._dual_error_segment(kind)
+        except Exception as exc:
+            logger.error("DUAL error segment unavailable: %s", exc)
+            return web.Response(status=502, text="DUAL error video unavailable")
+        return web.Response(
+            body=segment,
+            content_type="video/mp2t",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+            },
+        )
+
     async def _build_dual_result(self, request, body: dict) -> dict:
         requested_audio_lang = str(
             body.get("audio_lang") or body.get("audioLanguage") or ""
@@ -593,10 +766,19 @@ class HLSProxyDualMixin:
                 },
             )
         except DualLinksError as exc:
+            error_kind = _dual_error_kind(exc)
+            if error_kind:
+                return await self._dual_error_manifest(request, error_kind)
             return web.json_response({"status": "error", "detail": exc.message}, status=exc.status)
         except (ValueError, TypeError) as exc:
+            error_kind = _dual_error_kind(exc)
+            if error_kind:
+                return await self._dual_error_manifest(request, error_kind)
             return web.json_response({"status": "error", "detail": str(exc)}, status=400)
         except Exception as exc:
+            error_kind = _dual_error_kind(exc)
+            if error_kind:
+                return await self._dual_error_manifest(request, error_kind)
             logger.exception("DUAL server master build failed")
             return web.json_response(
                 {"status": "error", "detail": f"dual server build failed: {type(exc).__name__}"},
