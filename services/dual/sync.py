@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import os
 import re
@@ -16,6 +17,9 @@ from .http_client import client_session
 from .offsets import OffsetStore
 from .security import resolves_publicly, valid_public_url
 from .routing import RoutingOptions, from_values
+
+
+logger = logging.getLogger("easyproxy.dual.sync")
 
 
 class _MediaResponse:
@@ -373,7 +377,11 @@ class SyncEngine:
             reference_entries, _ = await self._video_entries(reference_audio_url, video_headers)
             reference_duration = sum(item["duration"] for item in reference_entries)
             if abs(reference_duration - video_duration) > 1.0:
-                raise ValueError("reference audio timeline mismatch")
+                logger.warning(
+                    "[DUAL] reference/video playlist durations differ: video=%.3fs reference=%.3fs; continuing with correlation",
+                    video_duration,
+                    reference_duration,
+                )
         audio_duration = sum(metadata["durs"])
         common = min(video_duration, reference_duration, audio_duration)
         if common < 90:
