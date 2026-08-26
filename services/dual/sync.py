@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import math
 import os
@@ -14,7 +15,7 @@ import aiohttp
 
 from .audio import AudioStore
 from .http_client import client_session
-from .offsets import OffsetStore
+from .offsets import RemoteOffsetStore
 from .security import resolves_publicly, valid_public_url
 from .routing import RoutingOptions, from_values
 
@@ -37,15 +38,17 @@ class SyncEngine:
     MAX_REDIRECTS = 5
     MAX_PLAYLIST_BYTES = 4 * 1024 * 1024
     MAX_MEDIA_BYTES = 32 * 1024 * 1024
-    MAX_SYNC_BYTES = 256 * 1024 * 1024
+    MAX_SYNC_BYTES = 512 * 1024 * 1024
 
-    def __init__(self, audio: AudioStore, offsets: OffsetStore, proxy: str = ""):
+    def __init__(self, audio: AudioStore, offsets: RemoteOffsetStore, proxy: str = ""):
         self.audio = audio
         self.offsets = offsets
         self.routing = RoutingOptions(forced_proxy=proxy.strip() or None)
         self.sample_seconds = 20
         self._sync_semaphore = asyncio.Semaphore(1)
         self._downloaded_bytes = 0
+        self._download_cache: dict[tuple[str, tuple[tuple[str, str], ...]], Path] = {}
+        self._download_cache_dir: Path | None = None
 
     def _account_bytes(self, amount: int) -> None:
         self._downloaded_bytes += amount
@@ -60,11 +63,11 @@ class SyncEngine:
         max_bytes: int = MAX_PLAYLIST_BYTES,
     ):
         current_url = url
-        try:
-            for redirect_count in range(self.MAX_REDIRECTS + 1):
-                if not valid_public_url(current_url) or not await resolves_publicly(current_url):
-                    raise ValueError("media URL is not public HTTPS")
-                proxy = self.routing.proxy_for(current_url)
+        for redirect_count in range(self.MAX_REDIRECTS + 1):
+            if not valid_public_url(current_url) or not await resolves_publicly(current_url):
+                raise ValueError("media URL is not public HTTPS")
+            proxy = self.routing.proxy_for(current_url)
+            try:
                 async with client_session(proxy, timeout=30) as (client, request_proxy):
                     async with client.get(
                         current_url,
@@ -124,9 +127,15 @@ class SyncEngine:
                             self._account_bytes(total)
                             content = b"".join(chunks)
                         return _MediaResponse(status_code, response_headers, content)
-        except aiohttp.ClientError as exc:
-            raise RuntimeError(f"media fetch failed: {exc}") from exc
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("media fetch timed out") from exc
+            except aiohttp.ClientError as exc:
+                raise RuntimeError(f"media fetch failed: {exc}") from exc
         raise ValueError("too many media redirects")
+
+    @staticmethod
+    def _download_key(url: str, headers: dict) -> tuple[str, tuple[tuple[str, str], ...]]:
+        return str(url), tuple(sorted((str(key), str(value)) for key, value in (headers or {}).items()))
 
     @staticmethod
     def _playlist(text: str, master_url: str):
@@ -153,7 +162,21 @@ class SyncEngine:
         return self._playlist(response.text, url)
 
     async def _download(self, url: str, path: Path, headers: dict):
-        await self._get(url, headers, destination=path, max_bytes=self.MAX_MEDIA_BYTES)
+        key = self._download_key(url, headers)
+        cached = self._download_cache.get(key)
+        if cached and cached.is_file():
+            shutil.copyfile(cached, path)
+            return
+
+        target = path
+        if self._download_cache_dir is not None:
+            digest = hashlib.sha256(repr(key).encode()).hexdigest()
+            target = self._download_cache_dir / f"{digest}.bin"
+        await self._get(url, headers, destination=target, max_bytes=self.MAX_MEDIA_BYTES)
+        if self._download_cache_dir is not None:
+            self._download_cache[key] = target
+            if target != path:
+                shutil.copyfile(target, path)
 
     def _sample_entries(self, entries, position: float):
         target = next((i for i, item in enumerate(entries)
@@ -334,7 +357,15 @@ class SyncEngine:
         try:
             async with self._sync_semaphore:
                 self.routing = from_values(payload.get("_routing"), payload)
-                return await self._measure(payload)
+                self._download_cache = {}
+                cache_directory = tempfile.TemporaryDirectory(prefix="dual-sync-cache-")
+                self._download_cache_dir = Path(cache_directory.name)
+                try:
+                    return await self._measure(payload)
+                finally:
+                    self._download_cache.clear()
+                    self._download_cache_dir = None
+                    cache_directory.cleanup()
         finally:
             self.audio.unpin(audio_hid)
 

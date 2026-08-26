@@ -20,7 +20,7 @@ class AudioStore:
 
     The DUAL service is used as a personal service, so source audio and generated
     fMP4 fragments are processed per request and removed with their temporary
-    working directory. Offset data remains persisted separately by OffsetStore.
+    working directory. Offset data remains persisted separately by the offset API.
     """
 
     TRACK_TTL_SECONDS = 21600
