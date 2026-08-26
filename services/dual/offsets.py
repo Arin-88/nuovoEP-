@@ -1,190 +1,72 @@
-"""Shared MongoDB cache for DUAL synchronization offsets."""
+"""HTTPS client for the separate DUAL offset API."""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import logging
-import time
-from typing import Any
 
-from pymongo import ASCENDING, DESCENDING, MongoClient
-from pymongo.errors import PyMongoError
+import aiohttp
 
 
 logger = logging.getLogger("easyproxy.dual.offsets")
 
-# Shared offset database used by every EasyProxy instance.
-SHARED_MONGO_URI = "mongodb+srv://easyproxy:1R8GrKM9unOG7K63@easyproxy.g3pkclx.mongodb.net/?appName=easyproxy"
-SHARED_MONGO_DATABASE = "easyproxy"
-SHARED_MONGO_COLLECTION = "offsets"
 
+class RemoteOffsetStore:
+    """Use the central offset API; no MongoDB connection exists in EasyProxy."""
 
-class OffsetStore:
-    """Shared offset cache.
-
-    Only synchronization metadata is stored. Media, source URLs and tokens are
-    never persisted. MongoDB calls run in worker threads so the aiohttp event
-    loop is not blocked by the synchronous PyMongo client.
-    """
-
-    def __init__(
-        self,
-        path: str | None = None,
-        mongo_uri: str | None = None,
-        db_name: str | None = None,
-        collection_name: str | None = None,
-    ):
-        del path  # Kept for constructor compatibility; SQLite is intentionally gone.
-        self.mongo_uri = (mongo_uri or SHARED_MONGO_URI).strip()
-        self.db_name = (db_name or SHARED_MONGO_DATABASE).strip()
-        self.collection_name = (collection_name or SHARED_MONGO_COLLECTION).strip()
-        self._client = MongoClient(
-            self.mongo_uri,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            appname="easyproxy-offsets",
-        )
-        self._collection = self._client[self.db_name][self.collection_name]
-        self._ensure_indexes()
-        logger.info(
-            "DUAL offset cache: shared MongoDB database=%s collection=%s",
-            self.db_name,
-            self.collection_name,
-        )
-
-    def _ensure_indexes(self) -> None:
-        self._collection.create_index([("cache_key", ASCENDING)], unique=True)
-        self._collection.create_index(
-            [
-                ("media_key", ASCENDING),
-                ("resolution", ASCENDING),
-                ("video_fingerprint", ASCENDING),
-                ("status", ASCENDING),
-                ("updated_at", DESCENDING),
-            ]
-        )
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
 
     @staticmethod
     def key(media_key: str, resolution: int, video_fp: str, audio_fp: str) -> str:
-        import hashlib
-
         return hashlib.sha1(
             f"v2|{media_key}|{resolution}|{video_fp}|{audio_fp}".encode()
         ).hexdigest()
 
-    @staticmethod
-    def _clean_document(document: dict[str, Any] | None):
-        if not document:
-            return None
-        result = dict(document)
-        result.pop("_id", None)
-        details = result.get("details")
-        if isinstance(details, str):
-            try:
-                result["details"] = json.loads(details)
-            except (TypeError, ValueError):
-                result["details"] = {}
-        return result
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is not None and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=5),
+                    connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300),
+                    headers={"Accept": "application/json"},
+                )
+        return self._session
 
-    def _mongo_get(self, cache_key: str):
+    async def _post(self, path: str, payload: dict) -> dict | None:
         try:
-            return self._clean_document(
-                self._collection.find_one({"cache_key": cache_key})
-            )
-        except PyMongoError:
-            logger.warning("MongoDB offset lookup failed", exc_info=True)
+            session = await self._get_session()
+            async with session.post(f"{self.base_url}{path}", json=payload) as response:
+                if response.status >= 400:
+                    logger.warning("Remote offset API returned HTTP %s", response.status)
+                    return None
+                data = await response.json()
+                return data if isinstance(data, dict) else None
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            logger.warning("Remote offset API request failed", exc_info=True)
             return None
 
     async def lookup(self, payload: dict):
-        return await asyncio.to_thread(self._mongo_get, payload["cache_key"])
-
-    @staticmethod
-    def _cache_fields(payload: dict):
-        media_key = str(payload.get("mediaKey") or payload.get("media_key") or "")
-        try:
-            resolution = int(payload.get("resolution") or 0)
-        except (TypeError, ValueError):
-            return None
-        video_fp = str(
-            payload.get("videoFingerprint")
-            or payload.get("video_fingerprint")
-            or ""
-        )
-        audio_fp = str(
-            payload.get("audioFingerprint")
-            or payload.get("audio_fingerprint")
-            or ""
-        )
-        if not media_key or resolution <= 0 or not video_fp:
-            return None
-        return media_key, resolution, video_fp, audio_fp
-
-    def _cache_status(self, payload: dict):
-        fields = self._cache_fields(payload)
-        if not fields:
-            return None
-        media_key, resolution, video_fp, audio_fp = fields
-        try:
-            if audio_fp:
-                document = self._collection.find_one(
-                    {"cache_key": self.key(media_key, resolution, video_fp, audio_fp)}
-                )
-            else:
-                base_filter = {
-                    "media_key": media_key,
-                    "resolution": resolution,
-                    "video_fingerprint": video_fp,
-                }
-                document = self._collection.find_one(
-                    {**base_filter, "status": "ok"},
-                    sort=[("updated_at", DESCENDING)],
-                )
-                if document is None:
-                    document = self._collection.find_one(
-                        base_filter, sort=[("updated_at", DESCENDING)]
-                    )
-            document = self._clean_document(document)
-        except PyMongoError:
-            logger.warning("MongoDB offset status lookup failed", exc_info=True)
-            return None
-        if not document:
-            return None
-        return {
-            "status": document.get("status"),
-            "offset": document.get("offset_seconds"),
-            "rate": document.get("rate"),
-            "confidence": document.get("confidence"),
-            "updated_at": document.get("updated_at"),
-        }
+        response = await self._post("/v1/dual/offset/lookup", payload)
+        result = response.get("offset") if response else None
+        return result if isinstance(result, dict) else None
 
     async def cache_status(self, payload: dict):
-        return await asyncio.to_thread(self._cache_status, payload)
-
-    def _mongo_put(self, payload: dict, result: dict):
-        document = {
-            "cache_key": payload["cache_key"],
-            "media_key": payload["media_key"],
-            "resolution": int(payload["resolution"]),
-            "video_fingerprint": payload["video_fingerprint"],
-            "audio_fingerprint": payload["audio_fingerprint"],
-            "offset_seconds": result.get("offset"),
-            "rate": result.get("rate", 1.0),
-            "confidence": result.get("confidence", 0.0),
-            "status": result.get("status", "incompatible"),
-            "details": dict(result),
-            "updated_at": time.time(),
-        }
-        self._collection.replace_one(
-            {"cache_key": document["cache_key"]}, document, upsert=True
-        )
+        response = await self._post("/v1/dual/offset/status", payload)
+        result = response.get("offset") if response else None
+        return result if isinstance(result, dict) else None
 
     async def report(self, payload: dict, result: dict):
-        try:
-            await asyncio.to_thread(self._mongo_put, payload, result)
-        except PyMongoError:
-            # Playback remains available; only the shared cache write failed.
-            logger.warning("MongoDB offset report failed", exc_info=True)
+        await self._post(
+            "/v1/dual/offset/report",
+            {**payload, "offset": result},
+        )
 
-    def close(self) -> None:
-        self._client.close()
+    async def aclose(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()

@@ -13,4 +13,3 @@ curl_cffi
 brotli
 psutil
 pywidevine
-pymongo[srv]

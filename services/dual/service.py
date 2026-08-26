@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 from aiohttp import web
 
 from .audio import AudioStore
-from .offsets import OffsetStore
+from .offsets import RemoteOffsetStore
 from .routing import as_payload, from_values
 from .security import SessionManager, request_token, resolves_publicly
 from .sync import SyncEngine
@@ -40,7 +40,7 @@ def configure_cache(cache_dir: str | Path) -> None:
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     audio = AudioStore(str(cache_path / "audio"))
-    offsets = OffsetStore()
+    offsets = RemoteOffsetStore("https://dualdb.realbestia.com")
     sync_engine = SyncEngine(audio, offsets)
 
 
@@ -370,7 +370,10 @@ async def _stop_cleanup(app: web.Application) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await task
     if offsets is not None:
-        offsets.close()
+        if hasattr(offsets, "aclose"):
+            await offsets.aclose()
+        else:
+            offsets.close()
 
 
 def _is_dual_path(path: str) -> bool:

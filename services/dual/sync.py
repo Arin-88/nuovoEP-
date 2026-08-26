@@ -15,7 +15,7 @@ import aiohttp
 
 from .audio import AudioStore
 from .http_client import client_session
-from .offsets import OffsetStore
+from .offsets import RemoteOffsetStore
 from .security import resolves_publicly, valid_public_url
 from .routing import RoutingOptions, from_values
 
@@ -40,7 +40,7 @@ class SyncEngine:
     MAX_MEDIA_BYTES = 32 * 1024 * 1024
     MAX_SYNC_BYTES = 512 * 1024 * 1024
 
-    def __init__(self, audio: AudioStore, offsets: OffsetStore, proxy: str = ""):
+    def __init__(self, audio: AudioStore, offsets: RemoteOffsetStore, proxy: str = ""):
         self.audio = audio
         self.offsets = offsets
         self.routing = RoutingOptions(forced_proxy=proxy.strip() or None)
