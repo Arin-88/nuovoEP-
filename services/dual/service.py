@@ -275,6 +275,11 @@ async def audio_init(request: web.Request) -> web.Response:
         return _audio_response(init_data, "video/mp4")
     except FileNotFoundError as exc:
         raise DualServiceError(410, "audio session expired") from exc
+    except asyncio.TimeoutError as exc:
+        raise DualServiceError(504, {
+            "code": "AUDIO_NETWORK_TIMEOUT",
+            "message": "audio upstream request timed out",
+        }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc
 
@@ -290,6 +295,11 @@ async def audio_segment(request: web.Request) -> web.Response:
         return _audio_response(fragment_data, "video/iso.segment")
     except FileNotFoundError as exc:
         raise DualServiceError(410, "audio session expired") from exc
+    except asyncio.TimeoutError as exc:
+        raise DualServiceError(504, {
+            "code": "AUDIO_NETWORK_TIMEOUT",
+            "message": "audio upstream request timed out",
+        }) from exc
     except (ValueError, RuntimeError) as exc:
         raise DualServiceError(404, str(exc)) from exc
 
