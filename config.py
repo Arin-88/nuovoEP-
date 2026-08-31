@@ -6,6 +6,7 @@ import socket
 import time
 import asyncio
 import contextvars
+import tracemalloc
 import urllib.request
 from dotenv import load_dotenv
 from config_store import (
@@ -36,6 +37,91 @@ ALL_PROXY_ERRORS = (
 
 
 APP_VERSION = "2.11.4"
+
+_MEMORY_PROFILE_FRAMES = 15
+_memory_profile_baseline = None
+_memory_profile_baseline_at = None
+
+
+def start_memory_profiler() -> dict:
+    """Start tracemalloc and save one baseline for leak investigation."""
+    global _memory_profile_baseline, _memory_profile_baseline_at
+    if not tracemalloc.is_tracing():
+        tracemalloc.start(_MEMORY_PROFILE_FRAMES)
+    if _memory_profile_baseline is None:
+        _memory_profile_baseline = tracemalloc.take_snapshot()
+        _memory_profile_baseline_at = time.time()
+    current, peak = tracemalloc.get_traced_memory()
+    return {
+        "enabled": True,
+        "frames": _MEMORY_PROFILE_FRAMES,
+        "baseline_at": _memory_profile_baseline_at,
+        "current": current,
+        "peak": peak,
+    }
+
+
+def reset_memory_profiler() -> dict:
+    """Replace the profiler baseline with the current live allocations."""
+    global _memory_profile_baseline, _memory_profile_baseline_at
+    if not tracemalloc.is_tracing():
+        tracemalloc.start(_MEMORY_PROFILE_FRAMES)
+    _memory_profile_baseline = tracemalloc.take_snapshot()
+    _memory_profile_baseline_at = time.time()
+    tracemalloc.reset_peak()
+    current, peak = tracemalloc.get_traced_memory()
+    return {
+        "enabled": True,
+        "frames": _MEMORY_PROFILE_FRAMES,
+        "baseline_at": _memory_profile_baseline_at,
+        "current": current,
+        "peak": peak,
+    }
+
+
+def _memory_profile_stat(stat) -> dict:
+    traceback = stat.traceback
+    frame = traceback[-1] if traceback else None
+    filename = frame.filename if frame else None
+    line = frame.lineno if frame else None
+    return {
+        "location": f"{filename}:{line}" if filename and line else "unknown",
+        "file": filename,
+        "line": line,
+        "size": stat.size,
+        "size_mb": round(stat.size / (1024 * 1024), 3),
+        "count": stat.count,
+        "traceback": traceback.format()[-5:],
+    }
+
+
+def get_memory_profile(limit: int = 30) -> dict:
+    """Return top Python allocations and growth since the startup baseline."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 30
+    limit = max(1, min(limit, 100))
+
+    start_memory_profiler()
+    current_snapshot = tracemalloc.take_snapshot()
+    current, peak = tracemalloc.get_traced_memory()
+    baseline = _memory_profile_baseline
+    growth = current_snapshot.compare_to(baseline, "lineno") if baseline else []
+
+    return {
+        "enabled": True,
+        "frames": _MEMORY_PROFILE_FRAMES,
+        "baseline_at": _memory_profile_baseline_at,
+        "baseline_age_seconds": round(time.time() - _memory_profile_baseline_at, 1) if _memory_profile_baseline_at else None,
+        "current": current,
+        "current_mb": round(current / (1024 * 1024), 3),
+        "peak": peak,
+        "peak_mb": round(peak / (1024 * 1024), 3),
+        "top_current": [_memory_profile_stat(stat) for stat in current_snapshot.statistics("lineno")[:limit]],
+        "top_growth": [_memory_profile_stat(stat) for stat in growth[:limit]],
+        "note": "tracemalloc misura solo allocazioni Python; RSS nativo e processi figli sono in /api/info.",
+    }
 
 
 def get_extractor_proxies(extractor_name: str) -> list:
@@ -975,18 +1061,105 @@ def get_system_stats():
     proxy_ram_used = ram_used
     proxy_ram_total = ram_total
     proxy_ram_percent = ram_percent
+    process_tree = []
+    main_process_rss = 0
+    children_rss = 0
+    ffmpeg_rss = 0
+    wireproxy_rss = 0
+    warp_rss = 0
+    other_children_rss = 0
+
+    def _process_role(name: str) -> str:
+        value = (name or "").lower()
+        if "ffmpeg" in value or "ffprobe" in value:
+            return "ffmpeg"
+        if "wireproxy" in value:
+            return "wireproxy"
+        if "warp" in value or "wgcf" in value:
+            return "warp"
+        return "other"
+
+    def _process_snapshot(process, role: str, memory_info) -> dict:
+        try:
+            name = process.name()
+        except Exception:
+            name = "unknown"
+        try:
+            status = process.status()
+        except Exception:
+            status = None
+        try:
+            threads = process.num_threads()
+        except Exception:
+            threads = None
+        rss = int(getattr(memory_info, "rss", 0) or 0)
+        return {
+            "pid": process.pid,
+            "name": name,
+            "role": role,
+            "status": status,
+            "rss": rss,
+            "rss_mb": round(rss / (1024 * 1024), 2),
+            "vms": int(getattr(memory_info, "vms", 0) or 0),
+            "threads": threads,
+        }
+
     try:
         proc = psutil.Process(os.getpid())
-        proxy_ram_used = proc.memory_info().rss
+        main_info = proc.memory_info()
+        main_process_rss = int(main_info.rss)
+        proxy_ram_used = main_process_rss
+        process_tree.append(_process_snapshot(proc, "easyproxy", main_info))
+
         for child in proc.children(recursive=True):
             try:
-                proxy_ram_used += child.memory_info().rss
+                child_info = child.memory_info()
+                child_snapshot = _process_snapshot(child, _process_role(child.name()), child_info)
+                process_tree.append(child_snapshot)
+                child_rss = child_snapshot["rss"]
+                children_rss += child_rss
+                proxy_ram_used += child_rss
+                if child_snapshot["role"] == "ffmpeg":
+                    ffmpeg_rss += child_rss
+                elif child_snapshot["role"] == "wireproxy":
+                    wireproxy_rss += child_rss
+                elif child_snapshot["role"] == "warp":
+                    warp_rss += child_rss
+                else:
+                    other_children_rss += child_rss
             except Exception:
                 pass
         proxy_ram_total = ram_total
         proxy_ram_percent = (proxy_ram_used / proxy_ram_total) * 100 if proxy_ram_total > 0 else 0
     except Exception:
         pass
+
+    process_tree.sort(key=lambda item: item.get("rss", 0), reverse=True)
+
+    asyncio_tasks = {"total": None, "by_coro": {}}
+    try:
+        task_counts = {}
+        for task in asyncio.all_tasks():
+            coro = task.get_coro()
+            coro_name = getattr(coro, "__qualname__", None) or type(coro).__name__
+            task_counts[coro_name] = task_counts.get(coro_name, 0) + 1
+        asyncio_tasks = {
+            "total": sum(task_counts.values()),
+            "by_coro": dict(sorted(task_counts.items(), key=lambda item: (-item[1], item[0]))),
+        }
+    except (RuntimeError, AttributeError):
+        pass
+
+    tracemalloc_stats = {"enabled": False, "current": 0, "peak": 0}
+    if tracemalloc.is_tracing():
+        traced_current, traced_peak = tracemalloc.get_traced_memory()
+        tracemalloc_stats = {
+            "enabled": True,
+            "current": traced_current,
+            "current_mb": round(traced_current / (1024 * 1024), 3),
+            "peak": traced_peak,
+            "peak_mb": round(traced_peak / (1024 * 1024), 3),
+        }
 
     # EasyProxy process CPU (including child processes)
     proxy_cpu_percent = cpu_percent
@@ -1048,6 +1221,24 @@ def get_system_stats():
             "free": max(0, proxy_ram_total - proxy_ram_used),
             "percent": round(proxy_ram_percent, 1)
         },
+        "processes": {
+            "count": len(process_tree),
+            "main_rss": main_process_rss,
+            "main_rss_mb": round(main_process_rss / (1024 * 1024), 2),
+            "children_rss": children_rss,
+            "children_rss_mb": round(children_rss / (1024 * 1024), 2),
+            "ffmpeg_rss": ffmpeg_rss,
+            "ffmpeg_rss_mb": round(ffmpeg_rss / (1024 * 1024), 2),
+            "wireproxy_rss": wireproxy_rss,
+            "wireproxy_rss_mb": round(wireproxy_rss / (1024 * 1024), 2),
+            "warp_rss": warp_rss,
+            "warp_rss_mb": round(warp_rss / (1024 * 1024), 2),
+            "other_children_rss": other_children_rss,
+            "other_children_rss_mb": round(other_children_rss / (1024 * 1024), 2),
+            "tree": process_tree,
+        },
+        "asyncio_tasks": asyncio_tasks,
+        "tracemalloc": tracemalloc_stats,
         "net": {
             "sent": round(net_sent, 1),
             "recv": round(net_recv, 1)

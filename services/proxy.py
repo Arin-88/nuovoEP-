@@ -77,6 +77,22 @@ class HLSProxy(
         self._background_tasks = set()
         self._prefetch_semaphore = asyncio.Semaphore(5)
         self._prefetch_lock = asyncio.Lock()
+        self._parallel_fetch_stats = {
+            "calls": 0,
+            "active": 0,
+            "active_peak": 0,
+            "successes": 0,
+            "fallbacks": 0,
+            "errors": 0,
+            "parts_per_call": 3,
+            "bytes_total": 0,
+            "max_segment_bytes": 0,
+            "last_segment_bytes": 0,
+            "last_status": None,
+            "last_reason": None,
+            "last_duration_ms": 0.0,
+            "last_segment": None,
+        }
 
         # Sessione condivisa per il proxy (no proxy)
         self.session = None
