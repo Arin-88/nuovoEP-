@@ -546,7 +546,7 @@ class HLSProxyDualMixin:
         return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
     @staticmethod
-    def _web_test_video_url(request, video_url: str, video: dict) -> str:
+    def _dual_video_proxy_url(request, video_url: str, video: dict) -> str:
         params = {
             "url": video_url,
             "redirect_stream": "true",
@@ -732,8 +732,7 @@ class HLSProxyDualMixin:
         }
         if bridge_used:
             result["sync_bridge"] = "eng"
-        if str(request.query.get("web_test") or "").lower() in {"1", "true"}:
-            result["video_url"] = self._web_test_video_url(request, video_url, video)
+        result["video_url"] = self._dual_video_proxy_url(request, video_url, video)
         result["m3u8"] = self._dual_master(result)
         return result
 

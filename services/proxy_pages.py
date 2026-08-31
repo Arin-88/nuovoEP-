@@ -425,7 +425,7 @@ class HLSProxyPagesMixin:
                 "/dual/menifest.m3u8": {
                     "get": {
                         "summary": "DUAL HLS master",
-                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
+                        "description": "Builds one HLS master containing a selected video and an extracted, synchronized audio track. The video is always served through EasyProxy's HLS proxy. The d parameter is URL-safe Base64 JSON. The endpoint is intentionally named menifest for compatibility.",
                         "parameters": [
                             {"name": "d", "in": "query", "required": True, "schema": {"type": "string"}, "description": "URL-safe Base64 JSON DualSyncRequest payload."},
                             {"name": "api_password", "in": "query", "schema": {"type": "string"}},

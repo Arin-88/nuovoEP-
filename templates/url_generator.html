@@ -1399,11 +1399,7 @@
 
         document.getElementById('playDualResult').addEventListener('click', () => {
             const url = document.getElementById('dualResult').value.trim();
-            if (url) {
-                const testUrl = new URL(url, window.location.href);
-                testUrl.searchParams.set('web_test', '1');
-                openPlayerModal(testUrl.toString());
-            }
+            if (url) openPlayerModal(url);
         });
 
         document.getElementById('showDualPayload').addEventListener('click', (event) => {
