@@ -23,6 +23,10 @@ from .routing import RoutingOptions, from_values
 logger = logging.getLogger("easyproxy.dual.sync")
 
 
+class _RangeDownloadFallback(RuntimeError):
+    """The upstream does not support a usable ranged response."""
+
+
 class _MediaResponse:
     def __init__(self, status_code: int, headers: dict, content: bytes):
         self.status_code = status_code
@@ -39,6 +43,12 @@ class SyncEngine:
     MAX_PLAYLIST_BYTES = 4 * 1024 * 1024
     MAX_MEDIA_BYTES = 32 * 1024 * 1024
     MAX_SYNC_BYTES = 512 * 1024 * 1024
+    SYNC_MIN_CORRELATION = 0.70
+    LINEAR_MIN_CORRELATION = 0.75
+    SYNC_MAX_DEVIATION = 0.25
+    LINEAR_MAX_DEVIATION = 0.10
+    MAX_RATE_DELTA = 0.002
+    MAX_END_DEVIATION = 1.5
 
     def __init__(self, audio: AudioStore, offsets: RemoteOffsetStore, proxy: str = ""):
         self.audio = audio
@@ -198,11 +208,89 @@ class SyncEngine:
                 digest = hashlib.sha256(repr(key).encode()).hexdigest()
                 target = self._download_cache_dir / f"{digest}.bin"
             async with self._media_download_semaphore:
-                await self._get(url, headers, destination=target, max_bytes=self.MAX_MEDIA_BYTES)
+                try:
+                    content = await self._download_ranged(url, headers)
+                except _RangeDownloadFallback:
+                    await self._get(
+                        url,
+                        headers,
+                        destination=target,
+                        max_bytes=self.MAX_MEDIA_BYTES,
+                    )
+                else:
+                    target.write_bytes(content)
             if self._download_cache_dir is not None:
                 self._download_cache[key] = target
                 if target != path:
                     shutil.copyfile(target, path)
+
+    async def _download_ranged(self, url: str, headers: dict) -> bytes:
+        """Fetch a media object in small ranges when the CDN throttles full GETs."""
+        chunk_size = 256 * 1024
+        base_headers = {
+            key: value for key, value in (headers or {}).items()
+            if str(key).lower() != "range"
+        }
+        body = bytearray()
+        total = None
+        start = 0
+        max_ranges = (self.MAX_MEDIA_BYTES // chunk_size) + 1
+
+        for _ in range(max_ranges):
+            request_headers = {
+                **base_headers,
+                "Range": f"bytes={start}-{start + chunk_size - 1}",
+            }
+            response = None
+            for attempt in range(2):
+                try:
+                    response = await asyncio.wait_for(
+                        self._get(
+                            url,
+                            request_headers,
+                            max_bytes=self.MAX_MEDIA_BYTES,
+                        ),
+                        timeout=10,
+                    )
+                    break
+                except (RuntimeError, asyncio.TimeoutError):
+                    if attempt == 0:
+                        await asyncio.sleep(0.15)
+            if response is None:
+                raise _RangeDownloadFallback("ranged media fetch failed")
+
+            if response.status_code == 200:
+                if len(response.content) > self.MAX_MEDIA_BYTES:
+                    raise ValueError("media response too large")
+                return response.content
+            if response.status_code != 206:
+                raise _RangeDownloadFallback("upstream rejected range request")
+
+            content_range = response.headers.get("Content-Range", "")
+            match = re.fullmatch(
+                r"bytes\s+(\d+)-(\d+)/(\d+|\*)",
+                content_range.strip(),
+                flags=re.IGNORECASE,
+            )
+            if not match or int(match.group(1)) != start or not response.content:
+                raise _RangeDownloadFallback("invalid ranged media response")
+            range_end = int(match.group(2))
+            declared_total = match.group(3)
+            if declared_total != "*":
+                total = int(declared_total)
+                if total > self.MAX_MEDIA_BYTES:
+                    raise ValueError("media response too large")
+            expected = range_end - start + 1
+            if len(response.content) > expected:
+                raise _RangeDownloadFallback("ranged media response is inconsistent")
+            body.extend(response.content)
+            start += len(response.content)
+            if total is not None and start >= total:
+                return bytes(body)
+            if len(response.content) < chunk_size:
+                return bytes(body)
+
+        raise ValueError("media response too large")
 
     def _sample_entries(self, entries, position: float, sample_seconds: float | None = None):
         sample_seconds = self.sample_seconds if sample_seconds is None else sample_seconds
@@ -305,7 +393,14 @@ class SyncEngine:
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    async def _decode_audio(self, hid: str, position: float, directory: Path):
+    async def _decode_audio(
+        self,
+        hid: str,
+        position: float,
+        directory: Path,
+        sample_seconds: float | None = None,
+    ):
+        sample_seconds = self.sample_seconds if sample_seconds is None else sample_seconds
         metadata = self.audio.metadata(hid)
         index = next((i for i, start in enumerate(metadata["starts"]) if start <= position < start + metadata["durs"][i]), len(metadata["segs"]) - 1)
         first = max(0, index - 1)
@@ -315,7 +410,7 @@ class SyncEngine:
         for item in range(first, len(metadata["segs"])):
             selected.append(item)
             available += metadata["durs"][item]
-            if available >= local_seek + self.sample_seconds + 5:
+            if available >= local_seek + sample_seconds + 5:
                 break
         lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
                  f"#EXT-X-TARGETDURATION:{int(max(metadata['durs'][item] for item in selected)) + 1}"]
@@ -358,48 +453,6 @@ class SyncEngine:
         if process.returncode or not output.exists() or output.stat().st_size < minimum_size:
             raise RuntimeError((error.decode(errors="replace") or "sample decode failed")[:300])
 
-    async def _muxed_reference_matches_video(
-        self,
-        video_url: str,
-        reference_url: str,
-        headers: dict,
-        position: float,
-        root: Path,
-    ) -> bool:
-        sample_seconds = 8.0
-        video_dir = root / "reference-check-video"
-        reference_dir = root / "reference-check-low"
-        video_dir.mkdir()
-        reference_dir.mkdir()
-        try:
-            video_result, reference_result = await self._gather_strict(
-                self._decode_video(
-                    video_url, headers, position, video_dir, sample_seconds
-                ),
-                self._decode_reference_audio(
-                    reference_url, headers, position, reference_dir, sample_seconds
-                ),
-            )
-            video_playlist, video_seek, _ = video_result
-            reference_playlist, reference_seek, _ = reference_result
-            video_pcm = root / "reference-check-video.pcm"
-            reference_pcm = root / "reference-check-low.pcm"
-            await self._gather_strict(
-                self._pcm(video_playlist, video_seek, video_pcm, sample_seconds=sample_seconds),
-                self._pcm(reference_playlist, reference_seek, reference_pcm, sample_seconds=sample_seconds),
-            )
-            video_envelope, reference_envelope = await asyncio.gather(
-                asyncio.to_thread(self._envelope, video_pcm),
-                asyncio.to_thread(self._envelope, reference_pcm),
-            )
-            lag, correlation = await asyncio.to_thread(
-                self._lag, video_envelope, reference_envelope, 1
-            )
-            return correlation >= .75 and abs(lag) <= .10
-        except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
-            logger.warning("[DUAL] muxed reference validation failed: %s", exc)
-            return False
-
     @staticmethod
     def _envelope(path: Path):
         values = array("h")
@@ -441,6 +494,102 @@ class SyncEngine:
                 if correlation > best[0]:
                     best = correlation, lag
         return best[1] / 100.0, best[0]
+
+    @classmethod
+    def _measurement_result(
+        cls,
+        video_duration: float,
+        audio_duration: float,
+        measurements: list[dict],
+        video_start_time: float = 0.0,
+    ) -> dict:
+        """Classify constant offset first, then safe linear drift.
+
+        A small duration mismatch can be clock drift rather than a different
+        edit.  In that case the offset changes with the timeline and a
+        constant-only check incorrectly rejects an otherwise valid DUAL pair.
+        The rate/end checks keep the fallback limited to tiny, reproducible
+        drift corrections.
+        """
+        result = {
+            "status": "incompatible",
+            "video_duration": video_duration,
+            "audio_duration": audio_duration,
+            "measurements": measurements,
+        }
+        valid = [
+            item for item in measurements
+            if item and float(item.get("correlation") or 0.0) >= cls.SYNC_MIN_CORRELATION
+        ]
+        if len(valid) < 3:
+            return result
+
+        measured = statistics.median(float(item["offset"]) for item in valid)
+        deviation = max(abs(float(item["offset"]) - measured) for item in valid)
+        if deviation <= cls.SYNC_MAX_DEVIATION:
+            result.update({
+                "status": "ok",
+                "offset": round(-measured + video_start_time, 3),
+                "rate": 1.0,
+                "confidence": min(float(item["correlation"]) for item in valid),
+                "deviation": deviation,
+                "sync_mode": "constant",
+            })
+            return result
+
+        linear_valid = [
+            item for item in valid
+            if float(item.get("correlation") or 0.0) >= cls.LINEAR_MIN_CORRELATION
+        ]
+        result["deviation"] = deviation
+        if len(linear_valid) < 3:
+            return result
+
+        positions = [float(item["position"]) for item in linear_valid]
+        offsets = [float(item["offset"]) for item in linear_valid]
+        mean_position = statistics.mean(positions)
+        mean_offset = statistics.mean(offsets)
+        denominator = sum(
+            (position - mean_position) ** 2 for position in positions
+        )
+        if denominator <= 0 or max(positions) - min(positions) < 60.0:
+            return result
+
+        slope = sum(
+            (position - mean_position) * (offset - mean_offset)
+            for position, offset in zip(positions, offsets)
+        ) / denominator
+        intercept = mean_offset - slope * mean_position
+        rate = 1.0 + slope
+        linear_deviation = max(
+            abs(offset - (intercept + slope * position))
+            for position, offset in zip(positions, offsets)
+        )
+        end_deviation = abs(
+            intercept + rate * video_duration - audio_duration
+        )
+        result.update({
+            "candidate_rate": rate,
+            "linear_deviation": linear_deviation,
+            "drift_per_hour": slope * 3600.0,
+            "end_deviation": end_deviation,
+        })
+        if (
+            abs(rate - 1.0) > cls.MAX_RATE_DELTA
+            or linear_deviation > cls.LINEAR_MAX_DEVIATION
+            or end_deviation > cls.MAX_END_DEVIATION
+        ):
+            return result
+
+        result.update({
+            "status": "ok",
+            "offset": round(-intercept + video_start_time, 3),
+            "rate": round(rate, 9),
+            "sync_mode": "linear",
+            "confidence": min(float(item["correlation"]) for item in linear_valid),
+            "deviation": linear_deviation,
+        })
+        return result
 
     async def measure(self, payload: dict):
         # Offset detection invokes several downloads and decoder processes.
@@ -575,37 +724,138 @@ class SyncEngine:
                 for index, position in enumerate(positions)
             )))
 
-        with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
-            root = Path(directory)
-            validation_task = None
-            if validate_muxed_reference:
-                timeline_matches = (
-                    len(video_entries) == len(reference_entries)
-                    and all(
-                        abs(video_item["duration"] - reference_item["duration"]) <= .02
-                        for video_item, reference_item in zip(video_entries, reference_entries)
-                    )
-                )
-                if timeline_matches:
-                    validation_task = asyncio.create_task(
-                        self._muxed_reference_matches_video(
-                            video_url,
-                            reference_audio_url,
-                            video_headers,
-                            min(video_duration, reference_duration) * .4,
-                            root,
-                        )
+        linear_measurements = []
+
+        async def collect_linear(positions):
+            """Repeat Toast's drift probe with duration-delta audio guesses."""
+            linear_sample_seconds = max(20.0, float(self.sample_seconds))
+            duration_delta = audio_duration - video_duration
+            guesses = [0.0]
+            if abs(duration_delta) >= 3.0:
+                guesses.extend((duration_delta, -duration_delta))
+            guesses = sorted(set(round(guess, 3) for guess in guesses))
+
+            async def collect_one_linear(position: float, index: int):
+                video_dir = root / f"linear-video-{index}"
+                video_dir.mkdir()
+                if reference_audio_url:
+                    reference_task = self._decode_reference_audio(
+                        reference_audio_url,
+                        video_headers,
+                        position,
+                        video_dir,
+                        linear_sample_seconds,
                     )
                 else:
-                    reference_matches_video = False
-                if reference_matches_video is False:
-                    logger.warning(
-                        "[DUAL] lowest muxed rendition differs from selected video; using selected video audio"
+                    reference_task = self._decode_video(
+                        video_url,
+                        video_headers,
+                        position,
+                        video_dir,
+                        linear_sample_seconds,
                     )
-                    reference_audio_url = ""
-                    reference_duration = video_duration
-                    video_start_time = 0.0
 
+                valid_guesses = [
+                    guess for guess in guesses
+                    if 0 <= position + guess <= max(0.0, audio_duration - 20.0)
+                ] or [0.0]
+                audio_tasks = []
+                for guess_index, guess in enumerate(valid_guesses):
+                    audio_dir = root / f"linear-audio-{index}-{guess_index}"
+                    audio_dir.mkdir()
+                    audio_tasks.append(self._decode_audio(
+                        audio_hid,
+                        position + guess,
+                        audio_dir,
+                        sample_seconds=linear_sample_seconds,
+                    ))
+
+                decoded = await asyncio.gather(
+                    reference_task,
+                    *audio_tasks,
+                    return_exceptions=True,
+                )
+                reference_result = decoded[0]
+                if isinstance(reference_result, BaseException):
+                    raise reference_result
+                audio_results = [
+                    (guess, item)
+                    for guess, item in zip(valid_guesses, decoded[1:])
+                    if not isinstance(item, BaseException)
+                ]
+                if not audio_results:
+                    raise RuntimeError("all drift audio samples failed")
+
+                reference_playlist, reference_seek, _ = reference_result
+                reference_pcm = root / f"linear-reference-{index}.pcm"
+                decode_tasks = [self._pcm(
+                    reference_playlist,
+                    reference_seek,
+                    reference_pcm,
+                    sample_seconds=linear_sample_seconds,
+                )]
+                audio_pcm_paths = []
+                for guess_index, (guess, audio_result) in enumerate(audio_results):
+                    audio_playlist, audio_seek, _ = audio_result
+                    audio_pcm = root / f"linear-audio-{index}-{guess_index}.pcm"
+                    audio_pcm_paths.append((guess, audio_pcm))
+                    decode_tasks.append(self._pcm(
+                        audio_playlist,
+                        audio_seek,
+                        audio_pcm,
+                        sample_seconds=linear_sample_seconds,
+                    ))
+                decoded_samples = await asyncio.gather(
+                    *decode_tasks,
+                    return_exceptions=True,
+                )
+                if isinstance(decoded_samples[0], BaseException):
+                    raise decoded_samples[0]
+
+                reference_envelope = await asyncio.to_thread(
+                    self._envelope, reference_pcm
+                )
+                best = None
+                for (guess, audio_pcm), sample in zip(
+                    audio_pcm_paths, decoded_samples[1:]
+                ):
+                    if isinstance(sample, BaseException):
+                        continue
+                    audio_envelope = await asyncio.to_thread(
+                        self._envelope, audio_pcm
+                    )
+                    lag, correlation = await asyncio.to_thread(
+                        self._lag, reference_envelope, audio_envelope
+                    )
+                    candidate = {
+                        "position": position,
+                        "guess": guess,
+                        "lag": lag,
+                        "offset": guess + lag,
+                        "correlation": correlation,
+                    }
+                    if best is None or correlation > best["correlation"]:
+                        best = candidate
+                if best is None:
+                    raise RuntimeError("drift samples produced no correlation")
+                return best
+
+            results = await asyncio.gather(*(
+                collect_one_linear(position, index)
+                for index, position in enumerate(positions)
+            ), return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "[DUAL] linear sync sample failed: %s: %s",
+                        type(result).__name__,
+                        str(result)[:180],
+                    )
+                    continue
+                linear_measurements.append(result)
+
+        with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
+            root = Path(directory)
             common = min(video_duration, reference_duration, audio_duration)
             if common < 90:
                 raise ValueError("media too short")
@@ -621,21 +871,14 @@ class SyncEngine:
             additional_positions = [
                 position for position in all_positions if position not in fast_positions
             ]
-            if validation_task is not None:
-                _, reference_matches_video = await self._gather_strict(
-                    collect(fast_positions), validation_task
-                )
-                if not reference_matches_video:
-                    logger.warning(
-                        "[DUAL] lowest muxed rendition differs from selected video; using selected video audio"
-                    )
-                    reference_audio_url = ""
-                    reference_duration = video_duration
-                    video_start_time = 0.0
-                    measurements.clear()
-                    await collect(fast_positions, "fallback")
-            else:
-                await collect(fast_positions)
+            # Toast syncs against the lowest muxed rendition directly. Do not
+            # perform a second high-vs-low media request here: that probe is
+            # both unnecessary and vulnerable to transient CDN 429 responses.
+            # The selected rendition is still used for playback; the low one
+            # is only the cheaper audio reference for correlation.
+            if validate_muxed_reference:
+                reference_matches_video = True
+            await collect(fast_positions)
             fast_valid = [item for item in measurements if item["correlation"] >= .65]
             if len(fast_valid) >= 3:
                 measured = statistics.median(item["offset"] for item in fast_valid)
@@ -660,20 +903,46 @@ class SyncEngine:
                     return result
 
             await collect(additional_positions)
-        # Require a quorum across the timeline. Some valid scenes have little
-        # audio signal and produce low correlation; rejecting those alone made
-        # otherwise stable sources fail. The offset deviation check remains
-        # strict, so unrelated editions still stay incompatible.
-        valid = [item for item in measurements if item["correlation"] >= .70]
-        if len(valid) < 3:
-            result = {"status": "incompatible", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
-        else:
-            measured = statistics.median(item["offset"] for item in valid)
-            deviation = max(abs(item["offset"] - measured) for item in valid)
-            result = {"status": "ok" if deviation <= .25 else "incompatible", "offset": round(-measured + video_start_time, 3), "rate": 1.0, "confidence": min(item["correlation"] for item in valid), "deviation": deviation, "sync_mode": "constant", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
-            if reference_audio_url:
-                result["video_start_time"] = round(video_start_time, 3)
+            result = self._measurement_result(
+                video_duration,
+                audio_duration,
+                measurements,
+                video_start_time,
+            )
+            if result["status"] != "ok":
+                linear_positions = sorted(set(round(position, 3) for position in (
+                    min(60.0, common * .1),
+                    common * .5,
+                    max(30.0, common - 90.0),
+                )))
+                await collect_linear(linear_positions)
+
+        if result["status"] != "ok" and linear_measurements:
+            linear_result = self._measurement_result(
+                video_duration,
+                audio_duration,
+                linear_measurements,
+                video_start_time,
+            )
+            if linear_result["status"] == "ok":
+                result = linear_result
+            else:
+                result["linear_measurements"] = linear_measurements
+        if result["status"] != "ok":
+            logger.warning(
+                "[DUAL] sync rejected video=%.3fs audio=%.3fs deviation=%.3fs "
+                "linear_samples=%d rate=%s linear_deviation=%s end_deviation=%s",
+                video_duration,
+                audio_duration,
+                float(result.get("deviation") or 0.0),
+                len(linear_measurements),
+                result.get("candidate_rate", "-"),
+                result.get("linear_deviation", "-"),
+                result.get("end_deviation", "-"),
+            )
         if validate_muxed_reference:
             result["reference_matches_video"] = bool(reference_matches_video)
+        if reference_audio_url and result.get("status") == "ok":
+            result["video_start_time"] = round(video_start_time, 3)
         result["cache_key"] = cache_key
         return result
