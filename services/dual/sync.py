@@ -44,7 +44,7 @@ class SyncEngine:
         self.audio = audio
         self.offsets = offsets
         self.routing = RoutingOptions(forced_proxy=proxy.strip() or None)
-        self.sample_seconds = 20
+        self.sample_seconds = 5
         self._sync_semaphore = asyncio.Semaphore(1)
         self._media_download_semaphore = asyncio.Semaphore(6)
         self._downloaded_bytes = 0
