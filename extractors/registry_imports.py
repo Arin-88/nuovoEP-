@@ -44,6 +44,7 @@ VidXgoExtractor = None
 EmbedStExtractor = None
 VidSonicExtractor = None
 VidLinkExtractor = None
+VidFastExtractor = None
 MediasetExtractor = None
 WittyTVExtractor = None
 RaiPlayExtractor = None
@@ -238,6 +239,13 @@ except Exception as e:
     VidLinkExtractor = None
 
 try:
+    from extractors.vidfast import VidFastExtractor
+    logger.info("✅ VidFastExtractor module loaded.")
+except Exception as e:
+    logger.warning("⚠️ VidFastExtractor failed to load: %s", e)
+    VidFastExtractor = None
+
+try:
     from extractors.mediaset import MediasetExtractor, WittyTVExtractor
     logger.info("✅ MediasetExtractor and WittyTVExtractor modules loaded.")
 except Exception as e:
@@ -284,6 +292,7 @@ __all__ = [
     "EmbedStExtractor",
     "VidSonicExtractor",
     "VidLinkExtractor",
+    "VidFastExtractor",
     "MediasetExtractor",
     "WittyTVExtractor",
     "RaiPlayExtractor",

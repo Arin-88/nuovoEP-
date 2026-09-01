@@ -275,6 +275,14 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list
                     )
                 return self.extractors[key]
+            elif host in {"vidfast", "vidfast.vc"}:
+                if VidFastExtractor is None:
+                    raise RuntimeError("VidFastExtractor module not available")
+                if key not in self.extractors:
+                    self.extractors[key] = VidFastExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
             elif host in {"mediaset", "mediasetinfinity"}:
                 key = _cache_key("mediaset", bypass_warp)
                 if MediasetExtractor is None:
@@ -700,6 +708,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 raise RuntimeError("VidLinkExtractor module not available")
             if key not in self.extractors:
                 self.extractors[key] = VidLinkExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+        elif re.search(r"(?:www\.)?vidfast\.vc/(?:movie/|tv/)", url, re.IGNORECASE):
+            key = _cache_key("vidfast", bypass_warp)
+            proxy = get_proxy_for_url("vidfast.vc", bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "vidfast")
+            if VidFastExtractor is None:
+                raise RuntimeError("VidFastExtractor module not available")
+            if key not in self.extractors:
+                self.extractors[key] = VidFastExtractor(
                     request_headers, proxies=proxy_list
                 )
             return self.extractors[key]
