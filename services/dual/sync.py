@@ -55,13 +55,15 @@ class SyncEngine:
         self.offsets = offsets
         self.routing = RoutingOptions(forced_proxy=proxy.strip() or None)
         self.sample_seconds = 5
-        self._sync_semaphore = asyncio.Semaphore(1)
-        self._media_download_semaphore = asyncio.Semaphore(6)
+        # Match Toast's conservative sample concurrency.  Some CDN edges
+        # throttle the burst created by parallel range downloads.
+        self._media_download_semaphore = asyncio.Semaphore(3)
         self._downloaded_bytes = 0
         self._download_cache: dict[tuple[str, tuple[tuple[str, str], ...]], Path] = {}
         self._download_locks: dict[tuple[str, tuple[tuple[str, str], ...]], asyncio.Lock] = {}
         self._download_cache_dir: Path | None = None
         self._http_sessions: dict[str, tuple[aiohttp.ClientSession, str | None]] = {}
+        self._resolved_public_hosts: dict[tuple[str, int], bool] = {}
 
     def _account_bytes(self, amount: int) -> None:
         self._downloaded_bytes += amount
@@ -76,6 +78,21 @@ class SyncEngine:
         self._http_sessions[proxy] = created
         return created
 
+    async def _resolves_publicly_cached(self, url: str) -> bool:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or 443
+        key = host, port
+        if key in self._resolved_public_hosts:
+            return self._resolved_public_hosts[key]
+        try:
+            result = await asyncio.wait_for(resolves_publicly(url), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("[DUAL] public DNS check timed out host=%s", host)
+            result = False
+        self._resolved_public_hosts[key] = result
+        return result
+
     async def _get(
         self,
         url: str,
@@ -85,7 +102,7 @@ class SyncEngine:
     ):
         current_url = url
         for redirect_count in range(self.MAX_REDIRECTS + 1):
-            if not valid_public_url(current_url) or not await resolves_publicly(current_url):
+            if not valid_public_url(current_url) or not await self._resolves_publicly_cached(current_url):
                 raise ValueError("media URL is not public HTTPS")
             proxy = self.routing.proxy_for(current_url)
             try:
@@ -103,7 +120,7 @@ class SyncEngine:
                         if not location:
                             raise ValueError("media redirect has no location")
                         next_url = urljoin(current_url, location)
-                        if not valid_public_url(next_url) or not await resolves_publicly(next_url):
+                        if not valid_public_url(next_url) or not await self._resolves_publicly_cached(next_url):
                             raise ValueError("media redirect is not public HTTPS")
                         if redirect_count >= self.MAX_REDIRECTS:
                             raise ValueError("too many media redirects")
@@ -474,25 +491,64 @@ class SyncEngine:
         return [(value - mean) / std for value in envelope]
 
     @staticmethod
-    def _lag(reference, candidate, max_seconds=15):
-        best = (-2.0, 0)
-        for lag in range(-max_seconds * 100, max_seconds * 100 + 1):
+    def _lag(reference, candidate, max_seconds=5):
+        """Find the best lag without doing a full quadratic scan.
+
+        Envelopes are sampled at 100 Hz.  Scanning every 10 ms for every
+        linear-drift candidate made the 20-second probes CPU-bound.  A 50 ms
+        coarse scan followed by an 10 ms local scan keeps the old output
+        precision while reducing the work by roughly an order of magnitude.
+        """
+        max_lag = max_seconds * 100
+
+        def correlation(values_left, values_right, lag, minimum_size=500):
             if lag >= 0:
-                size = min(len(reference), len(candidate) - lag)
-                left, right = reference[:size], candidate[lag:lag + size]
+                size = min(len(values_left), len(values_right) - lag)
+                left, right = values_left[:size], values_right[lag:lag + size]
             else:
-                size = min(len(candidate), len(reference) + lag)
-                left, right = reference[-lag:-lag + size], candidate[:size]
-            if size < 500:
-                continue
+                size = min(len(values_right), len(values_left) + lag)
+                left, right = values_left[-lag:-lag + size], values_right[:size]
+            if size < minimum_size:
+                return None
             lm, rm = sum(left) / size, sum(right) / size
             lv = sum((value - lm) ** 2 for value in left)
             rv = sum((value - rm) ** 2 for value in right)
             denominator = math.sqrt(lv * rv)
             if denominator:
-                correlation = sum((left[i] - lm) * (right[i] - rm) for i in range(size)) / denominator
-                if correlation > best[0]:
-                    best = correlation, lag
+                return sum(
+                    (left[i] - lm) * (right[i] - rm) for i in range(size)
+                ) / denominator
+            return None
+
+        # Smooth blocks before the coarse pass.  This prevents a real peak
+        # from being skipped when its offset falls between coarse samples.
+        coarse_step = 5  # 50 ms; refined below to the original 10 ms.
+
+        def block_average(values):
+            return [
+                sum(values[index:index + coarse_step]) / coarse_step
+                for index in range(0, len(values) - coarse_step + 1, coarse_step)
+            ]
+
+        coarse_reference = block_average(reference)
+        coarse_candidate = block_average(candidate)
+        coarse_max_lag = max_lag // coarse_step
+        best = (-2.0, 0)
+        for lag in range(-coarse_max_lag, coarse_max_lag + 1):
+            score = correlation(
+                coarse_reference, coarse_candidate, lag, minimum_size=100
+            )
+            if score is not None and score > best[0]:
+                best = score, lag
+
+        coarse_lag = best[1] * coarse_step
+        for lag in range(
+            max(-max_lag, coarse_lag - coarse_step),
+            min(max_lag, coarse_lag + coarse_step) + 1,
+        ):
+            score = correlation(reference, candidate, lag)
+            if score is not None and score > best[0]:
+                best = score, lag
         return best[1] / 100.0, best[0]
 
     @classmethod
@@ -592,27 +648,31 @@ class SyncEngine:
         return result
 
     async def measure(self, payload: dict):
-        # Offset detection invokes several downloads and decoder processes.
-        # Serialize it so concurrent DUAL sessions cannot multiply the
-        # CPU/RAM/network cost on a personal EasyProxy instance.
+        # Each request gets isolated mutable state, so DUAL syncs can run
+        # concurrently without sharing routing, temporary files, or counters.
+        runner = SyncEngine(self.audio, self.offsets)
+        runner.sample_seconds = self.sample_seconds
+        return await runner._measure_isolated(payload)
+
+    async def _measure_isolated(self, payload: dict):
         audio_hid = str(payload.get("audio_hid") or "")
         self.audio.pin(audio_hid)
         try:
-            async with self._sync_semaphore:
-                self.routing = from_values(payload.get("_routing"), payload)
-                self._download_cache = {}
-                cache_directory = tempfile.TemporaryDirectory(prefix="dual-sync-cache-")
-                self._download_cache_dir = Path(cache_directory.name)
-                try:
-                    return await self._measure(payload)
-                finally:
-                    self._download_cache.clear()
-                    self._download_locks.clear()
-                    self._download_cache_dir = None
-                    sessions = [item[0] for item in self._http_sessions.values()]
-                    self._http_sessions.clear()
-                    await asyncio.gather(*(session.close() for session in sessions))
-                    cache_directory.cleanup()
+            self.routing = from_values(payload.get("_routing"), payload)
+            self._download_cache = {}
+            cache_directory = tempfile.TemporaryDirectory(prefix="dual-sync-cache-")
+            self._download_cache_dir = Path(cache_directory.name)
+            try:
+                return await self._measure(payload)
+            finally:
+                self._download_cache.clear()
+                self._download_locks.clear()
+                self._download_cache_dir = None
+                self._resolved_public_hosts.clear()
+                sessions = [item[0] for item in self._http_sessions.values()]
+                self._http_sessions.clear()
+                await asyncio.gather(*(session.close() for session in sessions))
+                cache_directory.cleanup()
         finally:
             self.audio.unpin(audio_hid)
 
@@ -652,6 +712,12 @@ class SyncEngine:
             lookup = None
         video_entries, _ = await self._video_entries(video_url, video_headers)
         video_duration = sum(item["duration"] for item in video_entries)
+        logger.info(
+            "[DUAL] sync source loaded video_duration=%.3fs segments=%d reference=%s",
+            video_duration,
+            len(video_entries),
+            bool(reference_audio_url),
+        )
         video_start_time = 0.0
         if reference_audio_url:
             video_start_time = await self._media_start_time(video_url, video_headers)
@@ -660,6 +726,11 @@ class SyncEngine:
         if reference_audio_url:
             reference_entries, _ = await self._video_entries(reference_audio_url, video_headers)
             reference_duration = sum(item["duration"] for item in reference_entries)
+            logger.info(
+                "[DUAL] sync reference loaded duration=%.3fs segments=%d",
+                reference_duration,
+                len(reference_entries),
+            )
             if abs(reference_duration - video_duration) > 1.0:
                 logger.warning(
                     "[DUAL] reference/video playlist durations differ: video=%.3fs reference=%.3fs; continuing with correlation",
@@ -713,7 +784,7 @@ class SyncEngine:
                 asyncio.to_thread(self._envelope, audio_pcm),
             )
             lag, correlation = await asyncio.to_thread(
-                self._lag, video_envelope, audio_envelope
+                self._lag, video_envelope, audio_envelope, 5
             )
             return {"position": position, "lag": lag, "offset": lag, "correlation": correlation}
 
@@ -775,6 +846,10 @@ class SyncEngine:
                     *audio_tasks,
                     return_exceptions=True,
                 )
+                logger.info(
+                    "[DUAL] linear playlists ready position=%.1f",
+                    position,
+                )
                 reference_result = decoded[0]
                 if isinstance(reference_result, BaseException):
                     raise reference_result
@@ -809,6 +884,10 @@ class SyncEngine:
                     *decode_tasks,
                     return_exceptions=True,
                 )
+                logger.info(
+                    "[DUAL] linear PCM ready position=%.1f",
+                    position,
+                )
                 if isinstance(decoded_samples[0], BaseException):
                     raise decoded_samples[0]
 
@@ -825,7 +904,7 @@ class SyncEngine:
                         self._envelope, audio_pcm
                     )
                     lag, correlation = await asyncio.to_thread(
-                        self._lag, reference_envelope, audio_envelope
+                        self._lag, reference_envelope, audio_envelope, 5
                     )
                     candidate = {
                         "position": position,
@@ -878,7 +957,12 @@ class SyncEngine:
             # is only the cheaper audio reference for correlation.
             if validate_muxed_reference:
                 reference_matches_video = True
+            logger.info(
+                "[DUAL] sync sampling fast positions=%s",
+                ",".join(f"{position:.1f}" for position in fast_positions),
+            )
             await collect(fast_positions)
+            logger.info("[DUAL] sync fast samples complete count=%d", len(measurements))
             fast_valid = [item for item in measurements if item["correlation"] >= .65]
             if len(fast_valid) >= 3:
                 measured = statistics.median(item["offset"] for item in fast_valid)
@@ -902,7 +986,12 @@ class SyncEngine:
                     result["cache_key"] = cache_key
                     return result
 
+            logger.info(
+                "[DUAL] sync sampling additional positions=%s",
+                ",".join(f"{position:.1f}" for position in additional_positions),
+            )
             await collect(additional_positions)
+            logger.info("[DUAL] sync additional samples complete count=%d", len(measurements))
             result = self._measurement_result(
                 video_duration,
                 audio_duration,
@@ -915,7 +1004,15 @@ class SyncEngine:
                     common * .5,
                     max(30.0, common - 90.0),
                 )))
+                logger.info(
+                    "[DUAL] sync sampling linear positions=%s",
+                    ",".join(f"{position:.1f}" for position in linear_positions),
+                )
                 await collect_linear(linear_positions)
+                logger.info(
+                    "[DUAL] sync linear samples complete count=%d",
+                    len(linear_measurements),
+                )
 
         if result["status"] != "ok" and linear_measurements:
             linear_result = self._measurement_result(
