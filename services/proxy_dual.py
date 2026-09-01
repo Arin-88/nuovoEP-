@@ -54,7 +54,7 @@ _LANGUAGE_ALIASES = {
     "rus": {"ru", "rus", "russian", "russo", "russian 5.1 (dd+)"},
 }
 _SAFE_HEADERS = re.compile(r"^[A-Za-z0-9-]+$")
-_DUAL_SYNC_TIMEOUT_SECONDS = 50
+_DUAL_SYNC_TIMEOUT_SECONDS = 120
 
 
 def _dual_error_code(error: BaseException) -> str:
