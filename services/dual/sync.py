@@ -340,7 +340,7 @@ class SyncEngine:
     @staticmethod
     async def _pcm(
         playlist: Path, seek: float, output: Path, audio_map: bool = True,
-        sample_seconds: float = 20,
+        sample_seconds: float = 5,
     ):
         command = ["ffmpeg", "-v", "error", "-threads", "1", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-i", str(playlist), "-ss", f"{max(0.0, seek):.3f}", "-t", f"{sample_seconds:g}"]
         if audio_map:
@@ -542,8 +542,18 @@ class SyncEngine:
             video_pcm = root / f"{batch}-video-{index}.pcm"
             audio_pcm = root / f"{batch}-audio-{index}.pcm"
             samples = await asyncio.gather(
-                self._pcm(reference_playlist, reference_seek, video_pcm),
-                self._pcm(audio_playlist, audio_seek, audio_pcm),
+                self._pcm(
+                    reference_playlist,
+                    reference_seek,
+                    video_pcm,
+                    sample_seconds=self.sample_seconds,
+                ),
+                self._pcm(
+                    audio_playlist,
+                    audio_seek,
+                    audio_pcm,
+                    sample_seconds=self.sample_seconds,
+                ),
                 return_exceptions=True,
             )
             failure = next((sample for sample in samples if isinstance(sample, BaseException)), None)
