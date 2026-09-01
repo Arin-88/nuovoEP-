@@ -344,10 +344,10 @@ class HLSProxyDualMixin:
         return str(text), final_url
 
     @staticmethod
-    def _pick_video(text: str, base_url: str, requested: int) -> tuple[str, int, str | None]:
+    def _pick_video(text: str, base_url: str, requested: int) -> tuple[str, int, str | None, bool]:
         variants, audios = _master_entries(text, base_url)
         if not variants:
-            return base_url, requested or 1080, None
+            return base_url, requested or 1080, None, False
         target = requested or max(item["height"] for item in variants)
         exact = [item for item in variants if item["height"] == target]
         candidates = exact or sorted(
@@ -357,11 +357,18 @@ class HLSProxyDualMixin:
         selected = candidates[0]
         group = selected["attributes"].get("AUDIO", "")
         reference = None
+        muxed_reference = False
         reference_candidates = [item for item in audios if not group or item.get("GROUP-ID") == group]
         if reference_candidates:
             english = [item for item in reference_candidates if _language_match(item, "eng")]
             reference = (english or reference_candidates)[0].get("url")
-        return selected["url"], selected["height"] or target or 1080, reference
+        elif len(variants) > 1:
+            reference = min(
+                variants,
+                key=lambda item: (item["height"] or 10_000, item["width"] or 10_000),
+            )["url"]
+            muxed_reference = reference != selected["url"]
+        return selected["url"], selected["height"] or target or 1080, reference, muxed_reference
 
     @staticmethod
     def _pick_audio(
@@ -608,10 +615,12 @@ class HLSProxyDualMixin:
 
         video_text, video_base = await self._manifest(video)
         requested_resolution = int(body.get("resolution") or 0)
-        video_url, resolution, auto_reference = self._pick_video(
+        video_url, resolution, auto_reference, muxed_reference = self._pick_video(
             video_text, video_base, requested_resolution
         )
-        reference_audio_url = str(body.get("reference_audio_url") or "").strip() or auto_reference
+        explicit_reference = str(body.get("reference_audio_url") or "").strip()
+        reference_audio_url = explicit_reference or auto_reference
+        validate_muxed_reference = bool(muxed_reference and not explicit_reference)
 
         audio_text, audio_base = await self._manifest(audio)
         selected_audio_url, audio_meta = self._pick_audio(
@@ -652,6 +661,7 @@ class HLSProxyDualMixin:
                 "video_url": video_url,
                 "video_headers": video.get("headers") or {},
                 "reference_audio_url": reference_audio_url,
+                "validate_muxed_reference": validate_muxed_reference,
                 "audio_hid": candidate.get("hid") or "",
                 "audio_fingerprint": candidate.get("audio_fingerprint") or "",
                 "video_fingerprint": video_fingerprint,
@@ -725,7 +735,11 @@ class HLSProxyDualMixin:
             "audio_hls_language": audio_meta.get("hls_language") or audio_lang,
             "resolution": resolution,
             "video_url": video_url,
-            "reference_audio_url": reference_audio_url,
+            "reference_audio_url": (
+                reference_audio_url
+                if synced.get("reference_matches_video", True)
+                else ""
+            ),
             "audio_url": self._audio_url_with_sync(str(prepared.get("url") or ""), synced),
             "audio_hid": audio_hid,
             "sync": synced,

@@ -812,10 +812,11 @@ class VixSrcExtractor:
                 embed_url = await self._resolve_embed_url_from_api(url, forced_proxy=forced_proxy)
                 if embed_url:
                     try:
+                        embed_proxy = forced_proxy or self.last_used_proxy
                         response = await self._make_curl_request(
                             embed_url,
                             headers=self._fresh_headers(referer=url),
-                            forced_proxy=forced_proxy,
+                            forced_proxy=embed_proxy,
                         )
                     except Exception as curl_err:
                         logger.warning("curl_cffi failed for embed %s, trying robust: %s", embed_url, curl_err)
@@ -823,7 +824,7 @@ class VixSrcExtractor:
                             response = await self._make_robust_request(
                                 embed_url,
                                 headers=self._fresh_headers(referer=url),
-                                forced_proxy=None,
+                                forced_proxy=embed_proxy,
                             )
                         except Exception as robust_err:
                             raise ExtractorError(f"VixSrc embed fetch failed: {robust_err}") from robust_err

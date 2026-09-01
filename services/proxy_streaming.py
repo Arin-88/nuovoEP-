@@ -115,6 +115,46 @@ class HLSProxyStreamingMixin:
             return web.Response(text=f"Segment error: {str(e)}", status=500)
 
     async def _proxy_segment_parallel(self, request, segment_url, headers, segment_name, bypass_warp, forced_proxy):
+        stats = getattr(self, "_parallel_fetch_stats", None)
+        if stats is None:
+            stats = {
+                "calls": 0, "active": 0, "active_peak": 0,
+                "successes": 0, "fallbacks": 0, "errors": 0,
+                "parts_per_call": _PARALLEL_PARTS, "bytes_total": 0,
+                "max_segment_bytes": 0, "last_segment_bytes": 0,
+                "last_status": None, "last_reason": None,
+                "last_duration_ms": 0.0, "last_segment": None,
+            }
+            self._parallel_fetch_stats = stats
+
+        started = time.monotonic()
+        stats["calls"] += 1
+        stats["active"] += 1
+        stats["active_peak"] = max(stats["active_peak"], stats["active"])
+        stats["last_segment"] = str(segment_name or "")[:160]
+        try:
+            result = await self._proxy_segment_parallel_impl(
+                request, segment_url, headers, segment_name, bypass_warp, forced_proxy
+            )
+            stats["successes"] += 1
+            stats["last_status"] = "success"
+            stats["last_reason"] = None
+            return result
+        except _ParallelFallback as exc:
+            stats["fallbacks"] += 1
+            stats["last_status"] = "fallback"
+            stats["last_reason"] = str(exc)[:240]
+            raise
+        except Exception as exc:
+            stats["errors"] += 1
+            stats["last_status"] = "error"
+            stats["last_reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            raise
+        finally:
+            stats["active"] = max(0, stats["active"] - 1)
+            stats["last_duration_ms"] = round((time.monotonic() - started) * 1000, 1)
+
+    async def _proxy_segment_parallel_impl(self, request, segment_url, headers, segment_name, bypass_warp, forced_proxy):
         """Download one segment via K parallel range requests to beat per-connection
         CDN throttling (e.g. vidsonic limits each TCP connection to ~1.7 Mbps while
         the video is 2.4 Mbps; 3 parallel ranges -> ~5 Mbps aggregate).
@@ -173,6 +213,12 @@ class HLSProxyStreamingMixin:
 
         if not total or total < _PARALLEL_MIN_SIZE:
             raise _ParallelFallback(f"segment too small ({total})")
+
+        stats = getattr(self, "_parallel_fetch_stats", None)
+        if stats is not None:
+            stats["bytes_total"] += total
+            stats["max_segment_bytes"] = max(stats["max_segment_bytes"], total)
+            stats["last_segment_bytes"] = total
 
         # 2) Split into K ranges and fetch in parallel.
         K = _PARALLEL_PARTS

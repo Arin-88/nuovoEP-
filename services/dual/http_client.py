@@ -29,14 +29,19 @@ def _proxy_settings(proxy: str):
     return None, proxy
 
 
-@asynccontextmanager
-async def client_session(proxy: str = "", timeout: float = 30):
+def create_client_session(proxy: str = "", timeout: float = 30):
     connector, request_proxy = _proxy_settings(proxy)
     kwargs = {"timeout": aiohttp.ClientTimeout(total=timeout)}
     if connector is not None:
         kwargs["connector"] = connector
-    async with aiohttp.ClientSession(**kwargs) as session:
+    return aiohttp.ClientSession(**kwargs), request_proxy
+
+
+@asynccontextmanager
+async def client_session(proxy: str = "", timeout: float = 30):
+    session, request_proxy = create_client_session(proxy, timeout)
+    async with session:
         yield session, request_proxy
 
 
-__all__ = ["client_session"]
+__all__ = ["client_session", "create_client_session"]
