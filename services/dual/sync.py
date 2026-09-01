@@ -458,7 +458,13 @@ class SyncEngine:
                 failure = next((sample for sample in samples if isinstance(sample, BaseException)), None)
                 if failure is not None:
                     raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
-                lag, correlation = self._lag(self._envelope(video_pcm), self._envelope(audio_pcm))
+                video_envelope, audio_envelope = await asyncio.gather(
+                    asyncio.to_thread(self._envelope, video_pcm),
+                    asyncio.to_thread(self._envelope, audio_pcm),
+                )
+                lag, correlation = await asyncio.to_thread(
+                    self._lag, video_envelope, audio_envelope
+                )
                 measurements.append({"position": position, "lag": lag, "offset": lag, "correlation": correlation})
 
         with tempfile.TemporaryDirectory(prefix="dual-sync-") as directory:
