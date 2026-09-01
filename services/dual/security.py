@@ -57,7 +57,7 @@ class _Session:
 
 
 class SessionManager:
-    IDLE_TIMEOUT_SECONDS = 30
+    IDLE_TIMEOUT_SECONDS = 60
 
     def __init__(self, ttl_seconds: int = 21600, fixed_token: str = ""):
         self.ttl_seconds = max(300, int(ttl_seconds))
