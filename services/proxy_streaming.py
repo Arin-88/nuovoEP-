@@ -1218,11 +1218,10 @@ class HLSProxyStreamingMixin:
                     active_proxy,
                     extractor_key=request.query.get("extractor_key"),
                 )
-            # Reactive WARP reconnect: only reconnect if WARP proxy itself is actually dead
+            # Do not restart the kernel tunnel from a stream request.
             if active_proxy and getattr(_shared, 'WARP_PROXY_URL', None) and active_proxy == _shared.WARP_PROXY_URL:
                 if not await self.is_warp_healthy():
-                    logger.warning("WARP proxy confirmed dead during stream failure, triggering reconnect...")
-                    asyncio.create_task(self.reconnect_warp())
+                    logger.warning("WARP proxy confirmed unhealthy during stream failure; automatic reconnect is disabled")
                 else:
                     logger.debug("WARP proxy is healthy; stream failure was due to upstream source.")
             if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSL" in str(e) or "ssl" in str(e):
@@ -1522,10 +1521,8 @@ class HLSProxyStreamingMixin:
                     await self._invalidate_proxy_session(segment_proxy)
                     if not await self.is_warp_healthy(timeout_sec=3):
                         logger.warning(
-                            "WARP health probe failed; reconnecting before segment retry"
+                            "WARP health probe failed; retrying without automatic tunnel restart"
                         )
-                        await self.reconnect_warp()
-                        await self._invalidate_proxy_session(segment_proxy)
 
                     retry_session, retry_proxy = await self._get_proxy_session(
                         url or init_url,

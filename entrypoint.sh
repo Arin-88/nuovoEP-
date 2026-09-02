@@ -1,21 +1,21 @@
 #!/bin/bash
 export PYTHONPATH=/app
 
-WARP_EXCLUDED_HOSTS="${WARP_EXCLUDED_HOSTS:-cinemacity.cc,*.cinemacity.cc,cccdn.net,*.cccdn.net,strem.fun,*.strem.fun,torrentio.strem.fun,real-debrid.com,*.real-debrid.com,realdebrid.com,*.realdebrid.com,api.real-debrid.com,premiumize.me,*.premiumize.me,www.premiumize.me,alldebrid.com,*.alldebrid.com,api.alldebrid.com,debrid-link.com,*.debrid-link.com,debridlink.com,*.debridlink.com,api.debrid-link.com,torbox.app,*.torbox.app,api.torbox.app,offcloud.com,*.offcloud.com,api.offcloud.com,put.io,*.put.io,api.put.io}"
 WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"
-WARP_MODE="${WARP_MODE:-wireproxy}"
-WARP_PROXY_HOST="${WARP_PROXY_HOST:-127.0.0.1}"
-WARP_PROXY_PORT="${WARP_PROXY_PORT:-1080}"
+WARP_PROXY_HOST="127.0.0.1"
+WARP_PROXY_PORT="1080"
+WARP_DIR="/tmp/easyproxy-warp"
+WARPCTL="/app/scripts/warp_userspace_ctl.sh"
 
-start_wireproxy_warp() {
-    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace proxy..."
+start_userspace_warp() {
+    echo "Starting Cloudflare WARP via wgcf + wgx userspace SOCKS5..."
 
-    if ! command -v wgcf >/dev/null 2>&1 || ! command -v wireproxy >/dev/null 2>&1; then
-        echo "wgcf or wireproxy not found. Rebuild the image with userspace WARP tools installed."
+    if ! command -v wgcf >/dev/null 2>&1 || \
+       ! command -v wgx >/dev/null 2>&1; then
+        echo "wgcf or wgx not found. Rebuild the image."
         return 1
     fi
 
-    WARP_DIR="${WARP_DIR:-/tmp/easyproxy-warp}"
     mkdir -p "$WARP_DIR"
     cd "$WARP_DIR" || return 1
 
@@ -27,82 +27,39 @@ start_wireproxy_warp() {
         wgcf update --license-key "$WARP_LICENSE_KEY" || true
     fi
 
-    rm -f wgcf-profile.conf wireproxy.conf
+    rm -f wgcf-profile.conf
     wgcf generate || return 1
 
-    cp wgcf-profile.conf wireproxy.conf
-    cat >> wireproxy.conf <<EOF
+    install -m 600 wgcf-profile.conf /etc/wireguard/wg0.conf
 
-[Socks5]
-BindAddress = ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}
-EOF
+    "$WARPCTL" start || return 1
 
-    wireproxy -c wireproxy.conf > /var/log/wireproxy.log 2>&1 &
-
-    echo "Waiting for wireproxy SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
+    echo "Waiting for wgx SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
     for i in $(seq 1 20); do
-        if command -v nc >/dev/null 2>&1 && nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT"; then
-            echo "WARP userspace SOCKS5 proxy is listening on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
+        if ! "$WARPCTL" status >/dev/null 2>&1; then
+            echo "wgx exited during startup."
+            return 1
+        fi
+        if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT"; then
+            echo "WARP userspace WireGuard + wgx SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
             return 0
         fi
         sleep 1
     done
 
-    echo "WARP userspace SOCKS5 proxy not detected yet; continuing startup."
-    return 0
+    echo "wgx SOCKS5 not detected."
+    return 1
 }
 
-# --- Cloudflare WARP Setup ---
-if [ "$WARP_MODE" = "wireproxy" ]; then
-        start_wireproxy_warp
-    else
-    echo "Starting Cloudflare WARP..."
-    if [ ! -c /dev/net/tun ]; then
-        echo "Warning: /dev/net/tun not found. Ensure --cap-add=NET_ADMIN and --device /dev/net/tun are used."
-    fi
+# No supervisor/restart loop: wgx starts once. Health checks report failure;
+# reconnect is explicit/manual only.
+cleanup() {
+    "$WARPCTL" stop >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
 
-    warp-svc --accept-tos > /var/log/warp-svc.log 2>&1 &
-
-    MAX_RETRIES=15
-    COUNT=0
-    while ! warp-cli --accept-tos status > /dev/null 2>&1; do
-        echo "Waiting for warp-svc... ($COUNT/$MAX_RETRIES)"
-        sleep 1
-        COUNT=$((COUNT+1))
-        if [ $COUNT -ge $MAX_RETRIES ]; then
-            echo "Failed to start warp-svc"
-            break
-        fi
-    done
-
-    if [ $COUNT -lt $MAX_RETRIES ]; then
-        IFS=',' read -ra WARP_EXCLUDED_HOSTS_LIST <<< "$WARP_EXCLUDED_HOSTS"
-        for domain in "${WARP_EXCLUDED_HOSTS_LIST[@]}"; do
-            domain="$(echo "$domain" | xargs)"
-            [ -z "$domain" ] && continue
-            (
-                warp-cli --accept-tos tunnel host add "$domain" > /dev/null 2>&1 || \
-                warp-cli --accept-tos add-excluded-domain "$domain" > /dev/null 2>&1
-            ) || true
-        done
-
-        echo "Connecting to WARP via Python..."
-        python /app/warp_setup.py
-
-        echo "⏳ Waiting for WARP to stabilize (10s)..."
-        sleep 10
-
-        if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 1080; then
-            echo "✅ WARP SOCKS5 proxy is listening on port 1080."
-        else
-            echo "⚠️ WARP SOCKS5 proxy not detected on port 1080 yet, but proceeding..."
-        fi
-
-        warp-cli --accept-tos status
-
-fi
-    fi
+start_userspace_warp || echo "WARP unavailable; EasyProxy will continue without the WARP proxy."
 
 echo "Starting EasyProxy..."
-cd /app
+cd /app || exit 1
 python app.py

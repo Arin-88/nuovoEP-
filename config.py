@@ -36,7 +36,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.8"
+APP_VERSION = "2.11.9"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -1065,7 +1065,9 @@ def get_system_stats():
     main_process_rss = 0
     children_rss = 0
     ffmpeg_rss = 0
-    wireproxy_rss = 0
+    wireproxy_rss = 0  # legacy API field; Wireproxy is no longer shipped
+    alighieri_rss = 0  # legacy API field; Alighieri is no longer shipped
+    wgx_rss = 0
     warp_rss = 0
     other_children_rss = 0
 
@@ -1075,6 +1077,10 @@ def get_system_stats():
             return "ffmpeg"
         if "wireproxy" in value:
             return "wireproxy"
+        if "alighieri" in value:
+            return "alighieri"
+        if "wgx" in value:
+            return "wgx"
         if "warp" in value or "wgcf" in value:
             return "warp"
         return "other"
@@ -1104,6 +1110,26 @@ def get_system_stats():
             "threads": threads,
         }
 
+    def _tracked_processes(proc):
+        """Return EasyProxy plus descendants and known proxy siblings."""
+        tracked = {proc.pid: proc}
+        try:
+            for child in proc.children(recursive=True):
+                tracked[child.pid] = child
+        except Exception:
+            pass
+        # entrypoint.sh starts wgx before Python, so wgx can be our sibling.
+        try:
+            parent = proc.parent()
+            for sibling in parent.children() if parent else []:
+                if sibling.pid == proc.pid:
+                    continue
+                if _process_role(sibling.name()) != "other":
+                    tracked[sibling.pid] = sibling
+        except Exception:
+            pass
+        return list(tracked.values())
+
     try:
         proc = psutil.Process(os.getpid())
         main_info = proc.memory_info()
@@ -1111,7 +1137,11 @@ def get_system_stats():
         proxy_ram_used = main_process_rss
         process_tree.append(_process_snapshot(proc, "easyproxy", main_info))
 
-        for child in proc.children(recursive=True):
+        tracked_processes = _tracked_processes(proc)
+        get_system_stats._tracked_processes = tracked_processes
+        for child in tracked_processes:
+            if child.pid == proc.pid:
+                continue
             try:
                 child_info = child.memory_info()
                 child_snapshot = _process_snapshot(child, _process_role(child.name()), child_info)
@@ -1123,6 +1153,10 @@ def get_system_stats():
                     ffmpeg_rss += child_rss
                 elif child_snapshot["role"] == "wireproxy":
                     wireproxy_rss += child_rss
+                elif child_snapshot["role"] == "alighieri":
+                    alighieri_rss += child_rss
+                elif child_snapshot["role"] == "wgx":
+                    wgx_rss += child_rss
                 elif child_snapshot["role"] == "warp":
                     warp_rss += child_rss
                 else:
@@ -1173,7 +1207,10 @@ def get_system_stats():
             _cpu_proc.cpu_percent(interval=None)  # establish baseline
 
         _cpu_children = getattr(get_system_stats, "_cpu_children", {})
-        current_children = {c.pid: c for c in _cpu_proc.children(recursive=True)}
+        current_children = {
+            c.pid: c for c in getattr(get_system_stats, "_tracked_processes", [])
+            if c.pid != _cpu_proc.pid
+        }
         # Drop dead children and baseline new ones
         for pid in list(_cpu_children.keys()):
             if pid not in current_children:
@@ -1231,6 +1268,10 @@ def get_system_stats():
             "ffmpeg_rss_mb": round(ffmpeg_rss / (1024 * 1024), 2),
             "wireproxy_rss": wireproxy_rss,
             "wireproxy_rss_mb": round(wireproxy_rss / (1024 * 1024), 2),
+            "alighieri_rss": alighieri_rss,
+            "alighieri_rss_mb": round(alighieri_rss / (1024 * 1024), 2),
+            "wgx_rss": wgx_rss,
+            "wgx_rss_mb": round(wgx_rss / (1024 * 1024), 2),
             "warp_rss": warp_rss,
             "warp_rss_mb": round(warp_rss / (1024 * 1024), 2),
             "other_children_rss": other_children_rss,

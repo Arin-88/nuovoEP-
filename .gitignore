@@ -11,6 +11,7 @@ dlstreams_activity.txt
 # keep scripts required at runtime in the image
 !/scripts/embedst_runner.mjs
 !/scripts/vidfast_runner.mjs
+!/scripts/warp_userspace_ctl.sh
 config.json
 /downloaded_files
 /cache
