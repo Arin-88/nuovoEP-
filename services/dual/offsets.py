@@ -43,7 +43,12 @@ class RemoteOffsetStore:
             session = await self._get_session()
             async with session.post(f"{self.base_url}{path}", json=payload) as response:
                 if response.status >= 400:
-                    logger.warning("Remote offset API returned HTTP %s", response.status)
+                    detail = (await response.text())[:300]
+                    logger.warning(
+                        "Remote offset API returned HTTP %s: %s",
+                        response.status,
+                        detail or "no response body",
+                    )
                     return None
                 data = await response.json()
                 return data if isinstance(data, dict) else None
@@ -57,7 +62,17 @@ class RemoteOffsetStore:
         return result if isinstance(result, dict) else None
 
     async def cache_status(self, payload: dict):
-        response = await self._post("/v1/dual/offset/status", payload)
+        # Toast uses camelCase while the shared offset API accepts snake_case.
+        # Normalize here so cache-status checks do not get rejected with 400.
+        normalized = {
+            "media_key": payload.get("media_key") or payload.get("mediaKey"),
+            "resolution": payload.get("resolution"),
+            "video_fingerprint": (
+                payload.get("video_fingerprint")
+                or payload.get("videoFingerprint")
+            ),
+        }
+        response = await self._post("/v1/dual/offset/status", normalized)
         result = response.get("offset") if response else None
         return result if isinstance(result, dict) else None
 
