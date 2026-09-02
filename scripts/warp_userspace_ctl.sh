@@ -1,16 +1,17 @@
 #!/bin/sh
 set -eu
 
-PID_FILE="/tmp/easyproxy-warp/wgx.pid"
+PID_FILE="/tmp/easyproxy-warp/wireproxy.pid"
 CONFIG_FILE="/etc/wireguard/wg0.conf"
-LOG_FILE="/var/log/wgx.log"
-WGX_BIN="/usr/local/bin/wgx"
+WIREPROXY_CONFIG="/tmp/easyproxy-warp/wireproxy.conf"
+LOG_FILE="/var/log/wireproxy.log"
+WIREPROXY_BIN="/usr/local/bin/wireproxy"
 SOCKS_ADDR="127.0.0.1:1080"
 
-pid_is_wgx() {
+pid_is_wireproxy() {
     pid="$1"
     [ -r "/proc/${pid}/comm" ] || return 1
-    [ "$(tr -d '\n' < "/proc/${pid}/comm")" = "wgx" ]
+    [ "$(tr -d '\n' < "/proc/${pid}/comm")" = "wireproxy" ]
 }
 
 read_pid() {
@@ -20,59 +21,75 @@ read_pid() {
     printf '%s\n' "$pid"
 }
 
-start_wgx() {
-    if pid=$(read_pid) && pid_is_wgx "$pid"; then
-        echo "wgx already running (pid ${pid})."
+write_wireproxy_config() {
+    cp "$CONFIG_FILE" "$WIREPROXY_CONFIG"
+    printf '\n[Socks5]\nBindAddress = %s\n' "$SOCKS_ADDR" >> "$WIREPROXY_CONFIG"
+    chmod 600 "$WIREPROXY_CONFIG"
+}
+
+start_wireproxy() {
+    if pid=$(read_pid) && pid_is_wireproxy "$pid"; then
+        echo "wireproxy already running (pid ${pid})."
         return 0
     fi
 
     rm -f "$PID_FILE"
-    [ -x "$WGX_BIN" ] || { echo "wgx binary not found." >&2; return 1; }
+    [ -x "$WIREPROXY_BIN" ] || { echo "wireproxy binary not found." >&2; return 1; }
     [ -f "$CONFIG_FILE" ] || { echo "WireGuard config not found." >&2; return 1; }
+    mkdir -p "$(dirname "$WIREPROXY_CONFIG")"
+    write_wireproxy_config
 
-    LOG_LEVEL=error "$WGX_BIN" --socks5 "$SOCKS_ADDR" --config "$CONFIG_FILE" \
+    if ! "$WIREPROXY_BIN" -n -c "$WIREPROXY_CONFIG" >/dev/null 2>&1; then
+        echo "wireproxy config validation failed." >&2
+        rm -f "$WIREPROXY_CONFIG"
+        return 1
+    fi
+
+    "$WIREPROXY_BIN" -c "$WIREPROXY_CONFIG" \
         >>"$LOG_FILE" 2>&1 &
     pid=$!
     printf '%s\n' "$pid" > "$PID_FILE"
-    echo "Started wgx (pid ${pid})."
+    echo "Started wireproxy (pid ${pid})."
 }
 
-stop_wgx() {
+stop_wireproxy() {
     pid=$(read_pid 2>/dev/null || true)
-    if [ -z "$pid" ] || ! pid_is_wgx "$pid"; then
+    if [ -z "$pid" ] || ! pid_is_wireproxy "$pid"; then
         rm -f "$PID_FILE"
+        rm -f "$WIREPROXY_CONFIG"
         return 0
     fi
 
     kill -TERM "$pid" 2>/dev/null || true
     i=0
-    while [ "$i" -lt 10 ] && pid_is_wgx "$pid"; do
+    while [ "$i" -lt 10 ] && pid_is_wireproxy "$pid"; do
         sleep 1
         i=$((i + 1))
     done
 
-    if pid_is_wgx "$pid"; then
-        echo "wgx did not stop within 10 seconds." >&2
+    if pid_is_wireproxy "$pid"; then
+        echo "wireproxy did not stop within 10 seconds." >&2
         return 1
     fi
     rm -f "$PID_FILE"
+    rm -f "$WIREPROXY_CONFIG"
 }
 
 case "${1:-status}" in
     start)
-        start_wgx
+        start_wireproxy
         ;;
     stop)
-        stop_wgx
+        stop_wireproxy
         ;;
     restart)
-        stop_wgx
-        start_wgx
+        stop_wireproxy
+        start_wireproxy
         ;;
     status)
         pid=$(read_pid 2>/dev/null || true)
-        if [ -n "$pid" ] && pid_is_wgx "$pid"; then
-            echo "wgx running (pid ${pid})."
+        if [ -n "$pid" ] && pid_is_wireproxy "$pid"; then
+            echo "wireproxy running (pid ${pid})."
             exit 0
         fi
         exit 1
