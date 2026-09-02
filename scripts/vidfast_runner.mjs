@@ -3,6 +3,7 @@
 // and returns the unlocked media URL as JSON on stdout.
 
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 
 const inputUrl = process.argv[2];
 const debug = process.env.VIDFAST_DEBUG === "1";
@@ -21,6 +22,7 @@ const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 const nativeFetch = globalThis.fetch.bind(globalThis);
+const nativeCrypto = globalThis.crypto ?? webcrypto;
 const cookies = new Map();
 let proxyDispatcher = null;
 
@@ -210,7 +212,7 @@ const context = {
   btoa: value => Buffer.from(value, "binary").toString("base64"),
   AbortController, AbortSignal, Request, Response, Headers, FormData,
   ReadableStream, Blob, File: NativeFile, TextEncoderStream, TextDecoderStream,
-  WebAssembly, crypto: globalThis.crypto, navigator, location, document,
+  WebAssembly, crypto: nativeCrypto, navigator, location, document,
   localStorage, sessionStorage, window: null, self: null, globalThis: null, global: null,
   performance: globalThis.performance,
   history: { pushState() {}, replaceState() {}, back() {}, forward() {}, go() {}, state: null, length: 1 },
