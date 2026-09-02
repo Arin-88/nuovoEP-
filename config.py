@@ -36,7 +36,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.11"
+APP_VERSION = "2.11.12"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -184,6 +184,9 @@ PROXY_TEST_TIMEOUT = 10
 cpu_cores = os.cpu_count() or 4
 PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 15))
 WARP_PROXY_URL = "socks5h://127.0.0.1:1080"
+# Monotonic timestamp of the last real WARP connector use. Health probes do
+# not update it; EasyProxy uses it to recycle WireProxy only after true idle.
+WARP_LAST_ACTIVITY = 0.0
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -780,6 +783,11 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     if not proxy_url:
         return None
 
+    health_check = bool(kwargs.pop("health_check", False))
+    if proxy_url == WARP_PROXY_URL and not health_check:
+        global WARP_LAST_ACTIVITY
+        WARP_LAST_ACTIVITY = time.monotonic()
+
     connector_url = proxy_url
     rdns = kwargs.pop("rdns", False)
 
@@ -791,6 +799,13 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
         rdns = True
     elif connector_url.startswith("socks4://"):
         rdns = False
+
+    # WARP tunnel resta vivo; connessioni upstream no. Evita che ogni
+    # extractor mantenga socket CDN idle dentro WireProxy. force_close=True
+    # chiude il socket a fine response senza limitare concorrenza.
+    if proxy_url == WARP_PROXY_URL:
+        kwargs["force_close"] = True
+        kwargs.pop("keepalive_timeout", None)
 
     return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
 
@@ -1065,7 +1080,7 @@ def get_system_stats():
     main_process_rss = 0
     children_rss = 0
     ffmpeg_rss = 0
-    wireproxy_rss = 0  # legacy API field; Wireproxy is no longer shipped
+    wireproxy_rss = 0  # Wireproxy child-process RSS
     alighieri_rss = 0  # legacy API field; Alighieri is no longer shipped
     wgx_rss = 0
     warp_rss = 0
@@ -1118,7 +1133,7 @@ def get_system_stats():
                 tracked[child.pid] = child
         except Exception:
             pass
-        # entrypoint.sh starts wgx before Python, so wgx can be our sibling.
+        # entrypoint.sh starts wireproxy before Python, so wireproxy can be our sibling.
         try:
             parent = proc.parent()
             for sibling in parent.children() if parent else []:

@@ -8,11 +8,11 @@ WARP_DIR="/tmp/easyproxy-warp"
 WARPCTL="/app/scripts/warp_userspace_ctl.sh"
 
 start_userspace_warp() {
-    echo "Starting Cloudflare WARP via wgcf + wgx userspace SOCKS5..."
+    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace SOCKS5..."
 
     if ! command -v wgcf >/dev/null 2>&1 || \
-       ! command -v wgx >/dev/null 2>&1; then
-        echo "wgcf or wgx not found. Rebuild the image."
+       ! command -v wireproxy >/dev/null 2>&1; then
+        echo "wgcf or wireproxy not found. Rebuild the image."
         return 1
     fi
 
@@ -34,24 +34,24 @@ start_userspace_warp() {
 
     "$WARPCTL" start || return 1
 
-    echo "Waiting for wgx SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
+    echo "Waiting for wireproxy SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
     for i in $(seq 1 20); do
         if ! "$WARPCTL" status >/dev/null 2>&1; then
-            echo "wgx exited during startup."
+            echo "wireproxy exited during startup."
             return 1
         fi
         if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT"; then
-            echo "WARP userspace WireGuard + wgx SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
+            echo "WARP userspace WireGuard + wireproxy SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
             return 0
         fi
         sleep 1
     done
 
-    echo "wgx SOCKS5 not detected."
+    echo "wireproxy SOCKS5 not detected."
     return 1
 }
 
-# No supervisor/restart loop: wgx starts once. Health checks report failure;
+# No supervisor/restart loop: wireproxy starts once. Health checks report failure;
 # reconnect is explicit/manual only.
 cleanup() {
     "$WARPCTL" stop >/dev/null 2>&1 || true

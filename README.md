@@ -113,9 +113,9 @@ Only basic environment variables need to be set in your `.env` file or container
 | `API_PASSWORD` | Password to protect the proxy API and admin panel | `ep` |
 
 ### 🛡️ Cloudflare WARP Integration
-The Docker image includes `wgcf` + `wgx`, a userspace WireGuard SOCKS5 relay.
+The Docker image includes `wgcf` + `wireproxy`, a userspace WireGuard SOCKS5 relay.
 It requires no `NET_ADMIN`, privileged mode, `/dev/net/tun`, kernel module, or
-sysctl. Wireproxy is not shipped or started.
+sysctl.
 
 You can enable and configure WARP, customize the excluded domains list, and enter your license key directly from the **Admin Panel**.
 

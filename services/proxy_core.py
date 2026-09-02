@@ -10,6 +10,7 @@ import aiohttp
 import base64
 import hashlib
 import socket
+import config as _config
 import config_store
 
 import services.proxy_shared as _shared
@@ -131,6 +132,11 @@ class HLSProxyCoreMixin:
                 # 4. Compact Windows heap to release freed pages
                 await self._compact_heap()
 
+                # 5. WireProxy is a Go process: closed sockets can leave heap
+                # pages in its RSS. Recycle only after real WARP inactivity;
+                # health probes do not count as playback activity.
+                await self._recycle_idle_warp(time.monotonic())
+
             except Exception as e:
                 logger.error("Cleanup stale sessions error: %s", e)
                 await asyncio.sleep(10)
@@ -154,6 +160,77 @@ class HLSProxyCoreMixin:
         except Exception:
             pass
 
+    @staticmethod
+    def _warp_established_connections() -> int | None:
+        """Count clients currently connected to WireProxy's SOCKS listener."""
+        paths = ("/proc/net/tcp", "/proc/net/tcp6")
+        if not any(os.path.exists(path) for path in paths):
+            return None
+        count = 0
+        try:
+            for path in paths:
+                if not os.path.exists(path):
+                    continue
+                with open(path, "r", encoding="ascii") as source:
+                    for line in source:
+                        fields = line.split()
+                        if len(fields) > 3 and fields[1].rsplit(":", 1)[-1].upper() == "0438" and fields[3] == "01":
+                            count += 1
+        except (OSError, UnicodeError):
+            return None
+        return count
+
+    async def _recycle_idle_warp(self, now: float) -> None:
+        """Restart WireProxy after idle to return retained Go heap to the OS."""
+        if not _shared.ENABLE_WARP:
+            return
+        last_activity = getattr(_config, "WARP_LAST_ACTIVITY", 0.0)
+        if not last_activity or now - last_activity < 120:
+            return
+        if self._warp_established_connections() != 0:
+            return
+        lock = getattr(self, "_warp_idle_recycle_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._warp_idle_recycle_lock = lock
+        async with lock:
+            last_activity = getattr(_config, "WARP_LAST_ACTIVITY", 0.0)
+            if not last_activity or time.monotonic() - last_activity < 120:
+                return
+            if self._warp_established_connections() != 0:
+                return
+            warp_url = _shared.WARP_PROXY_URL
+            await self._invalidate_proxy_session(warp_url)
+            try:
+                rc = await self._run_warp_control("restart")
+            except (FileNotFoundError, asyncio.TimeoutError, OSError) as exc:
+                logger.warning("[NET] Idle WireProxy recycle failed: %s", exc)
+                return
+            if rc == 0:
+                if await self._wait_for_warp_socket():
+                    _config.WARP_LAST_ACTIVITY = 0.0
+                    logger.info("[NET] Recycled idle WireProxy after 120s; WARP sockets/RSS reset")
+                else:
+                    logger.warning("[NET] WireProxy restarted but SOCKS port 1080 did not recover")
+            else:
+                logger.warning("[NET] Idle WireProxy recycle returned code %s", rc)
+
+    @staticmethod
+    async def _wait_for_warp_socket(timeout: float = 20.0) -> bool:
+        """Wait until the restarted WireProxy SOCKS listener accepts clients."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", 1080), timeout=1.0
+                )
+                writer.close()
+                await writer.wait_closed()
+                return True
+            except (OSError, asyncio.TimeoutError):
+                await asyncio.sleep(0.25)
+        return False
+
 
     async def _warp_keepalive(self):
         """Periodically test WARP tunnel without restarting it automatically."""
@@ -166,7 +243,7 @@ class HLSProxyCoreMixin:
                     continue
                 try:
                     connector = get_connector_for_proxy(
-                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET
+                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
                     )
                     timeout = ClientTimeout(total=8)
                     async with ClientSession(connector=connector, timeout=timeout) as session:
@@ -190,7 +267,7 @@ class HLSProxyCoreMixin:
             return False
         try:
             connector = get_connector_for_proxy(
-                _WARP_PROXY_URL, limit=0, family=socket.AF_INET
+                _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
             )
             timeout = ClientTimeout(total=timeout_sec)
             async with ClientSession(connector=connector, timeout=timeout) as session:
@@ -217,7 +294,7 @@ class HLSProxyCoreMixin:
                 # Try to fetch the WARP IP via the proxy
                 try:
                     connector = get_connector_for_proxy(
-                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET
+                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
                     )
                     async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
                         async with session.get("https://api.ipify.org?format=json") as resp:
@@ -241,7 +318,7 @@ class HLSProxyCoreMixin:
         return await asyncio.wait_for(proc.wait(), timeout=20)
 
     async def reconnect_warp(self) -> dict:
-        """Manually restart wgx; automatic reconnect remains disabled."""
+        """Manually restart wireproxy; automatic reconnect remains disabled."""
         if not hasattr(self, "_warp_reconnect_lock"):
             self._warp_reconnect_lock = asyncio.Lock()
 
@@ -257,10 +334,10 @@ class HLSProxyCoreMixin:
             try:
                 rc = await self._run_warp_control("restart")
                 if rc != 0:
-                    return {"status": "error", "message": "wgx restart failed"}
+                    return {"status": "error", "message": "wireproxy restart failed"}
                 if await self.is_warp_healthy(timeout_sec=8):
                     return {"status": "ok", "message": "WARP userspace tunnel reconnected"}
-                return {"status": "error", "message": "wgx is up but WARP health check failed"}
+                return {"status": "error", "message": "wireproxy is up but WARP health check failed"}
             except (FileNotFoundError, asyncio.TimeoutError) as exc:
                 return {"status": "error", "message": f"WARP reconnect failed: {exc}"}
 
@@ -500,8 +577,9 @@ class HLSProxyCoreMixin:
             if forced_proxy.lower() == "off":
                 forced_proxy = None
 
-        # Stale proxy sessions cleanup (>60s idle, aligned with connector keepalive_timeout)
-        # WARP session is excluded — never closed automatically.
+        # Stale proxy sessions cleanup (>60s idle, aligned with connector keepalive_timeout).
+        # WARP session stays pooled, but its connector never keeps upstream TCP
+        # connections alive; the WireProxy process/tunnel remains available.
         if hasattr(self, "_proxy_session_atimes"):
             now = time.time()
             _warp_url = _shared.WARP_PROXY_URL
@@ -513,6 +591,10 @@ class HLSProxyCoreMixin:
                     await p_sess.close()
 
         proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
+        if proxy == _shared.WARP_PROXY_URL:
+            # Refresh on every real request, not only when the pooled session
+            # is created; this prevents recycling during an active HLS stream.
+            _config.WARP_LAST_ACTIVITY = time.monotonic()
 
         prefer_default_family = prefer_default_family_for_url(url)
 
@@ -539,13 +621,19 @@ class HLSProxyCoreMixin:
             if proxy not in self._proxy_sessions or self._proxy_sessions[proxy].closed:
                 logger.info(f"[NET] Creating pooled proxy session: {proxy}")
                 try:
-                    connector = get_connector_for_proxy(
-                        proxy,
-                        limit=0,
-                        limit_per_host=0,
-                        keepalive_timeout=15,
-                        family=socket.AF_INET,
-                    )
+                    connector_kwargs = {
+                        "limit": 0,
+                        "limit_per_host": 0,
+                        "family": socket.AF_INET,
+                    }
+                    if _shared.WARP_PROXY_URL and proxy == _shared.WARP_PROXY_URL:
+                        # Do not retain idle CDN sockets inside WireProxy after
+                        # a playlist/segment response completes. limit=0 stays:
+                        # this changes lifetime only, not concurrency.
+                        connector_kwargs["force_close"] = True
+                    else:
+                        connector_kwargs["keepalive_timeout"] = 15
+                    connector = get_connector_for_proxy(proxy, **connector_kwargs)
                     timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30)
                     session = ClientSession(timeout=timeout, connector=connector)
                     self._proxy_sessions[proxy] = session
