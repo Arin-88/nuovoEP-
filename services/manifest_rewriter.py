@@ -375,7 +375,7 @@ class ManifestRewriter:
             if disable_ssl:
                 header_params += "&disable_ssl=1"
             
-            if selected_proxy:
+            if selected_proxy and not bypass_proxies:
                 # Usiamo un formato pulito per evitare double-encoding
                 header_params += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
             if force_direct:
@@ -400,7 +400,7 @@ class ManifestRewriter:
                     f"{proxy_base}/proxy/hls/manifest.m3u8?d={encoded_variant_url}{header_params}"
                 )
             
-            if selected_proxy and "&proxy=" not in proxy_variant_url:
+            if selected_proxy and not bypass_proxies and "&proxy=" not in proxy_variant_url:
                 proxy_variant_url += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
 
             proxied_media_lines = []
@@ -515,7 +515,7 @@ class ManifestRewriter:
         if disable_ssl:
             header_params += "&disable_ssl=1"
         
-        if selected_proxy:
+        if selected_proxy and not bypass_proxies:
             header_params += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
         if force_direct:
             header_params += "&direct=1"
@@ -580,7 +580,7 @@ class ManifestRewriter:
                         proxy_key_url += "&proxy=off"
                     if disable_ssl:
                         proxy_key_url += "&disable_ssl=1"
-                    if selected_proxy:
+                    if selected_proxy and not bypass_proxies:
                         proxy_key_url += f"&proxy={urllib.parse.quote(selected_proxy, safe='')}"
                     if force_direct:
                         proxy_key_url += "&direct=1"

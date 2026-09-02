@@ -10,6 +10,7 @@ from services.proxy_shared import (
     check_vavoo_request,
     ManifestRewriter,
     get_public_base_url,
+    get_extractor_routing_overrides,
 )
 import config_store
 import asyncio
@@ -254,6 +255,18 @@ class HLSProxyExtractorHandlerMixin:
             force_direct = result.get("force_direct", False)
             bypass_warp = result.get("bypass_warp", bypass_warp)
 
+            # The extractor may return its own routing fields (VidFast's
+            # runner does not know about the admin toggle). Never let that
+            # result clear an admin-enforced bypass before building the relay.
+            admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+            if admin_warp_off:
+                bypass_warp = True
+                BYPASS_WARP_CONTEXT.set(True)
+                if _shared.WARP_PROXY_URL and selected_proxy == _shared.WARP_PROXY_URL:
+                    selected_proxy = None
+            if admin_proxy_off:
+                BYPASS_PROXIES_CONTEXT.set(True)
+
             logger.debug(f"Extractor Debug: Extractor result selected_proxy: {selected_proxy}")
 
             # Log dello stato dell'estrattore
@@ -414,6 +427,10 @@ class HLSProxyExtractorHandlerMixin:
                 q_params["api_password"] = api_password
             if selected_proxy:
                 q_params["proxy"] = selected_proxy
+            if bypass_warp:
+                q_params["warp"] = "off"
+            if BYPASS_PROXIES_CONTEXT.get():
+                q_params["proxy"] = "off"
             if extractor_key:
                 q_params["extractor_key"] = extractor_key
             if stream_key:
