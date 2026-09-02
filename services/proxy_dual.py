@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 
 import aiohttp
 
+import config_store
 from config import check_password
 from services.proxy_shared import (
     BYPASS_PROXIES_CONTEXT,
@@ -231,6 +232,23 @@ class HLSProxyDualMixin:
                 "proxy_off": proxy_off,
                 "forced_proxy": forced_proxy,
             }
+
+        # Apply the same admin routing overrides used by the public extractor
+        # endpoint. DUAL resolves extractors in-process, so it cannot rely on
+        # handle_extractor_request to apply these settings for it.
+        extractor_key = extractor_name.replace("_direct", "").replace("_noproxy", "")
+        warp_off_extractors = {
+            str(value).strip().lower()
+            for value in config_store.get("warp_off_extractors", [])
+        }
+        proxy_off_extractors = {
+            str(value).strip().lower()
+            for value in config_store.get("proxy_off_extractors", [])
+        }
+        if extractor_key in warp_off_extractors or extractor_key == "embedst":
+            warp_off = True
+        if extractor_key in proxy_off_extractors:
+            proxy_off = True
 
         bypass_token = BYPASS_WARP_CONTEXT.set(warp_off)
         proxy_bypass_token = BYPASS_PROXIES_CONTEXT.set(proxy_off)
