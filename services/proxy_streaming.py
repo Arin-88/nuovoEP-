@@ -36,6 +36,7 @@ from services.proxy_shared import (
     is_special_cdn_stream,
     ProxyDeadRetryError,
     get_public_base_url,
+    get_extractor_routing_overrides,
 )
 
 class _ParallelFallback(Exception):
@@ -472,6 +473,19 @@ class HLSProxyStreamingMixin:
         if bypass_warp is None:
             bypass_warp = request.query.get("warp", "").lower() == "off"
         bypass_proxies = request.query.get("proxy", "").lower() == "off"
+
+        # Keep the admin extractor policy on every relay/segment request. The
+        # extracted VidFast URL can point to an internal provider (e.g. Viprow),
+        # so relying only on the original query flags would re-enable WARP.
+        extractor_key = request.query.get("extractor_key", "")
+        admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+        if admin_warp_off:
+            bypass_warp = True
+            _shared.BYPASS_WARP_CONTEXT.set(True)
+        if admin_proxy_off:
+            bypass_proxies = True
+            _shared.BYPASS_PROXIES_CONTEXT.set(True)
+
         if bypass_proxies:
             _shared.BYPASS_PROXIES_CONTEXT.set(True)
         if force_direct is None:
@@ -481,7 +495,11 @@ class HLSProxyStreamingMixin:
 
         # Priorità: proxy passato esplicitamente -> proxy in query string.
         # In forced-direct retry (WARP fallback), ignore proxy query params.
-        forced_proxy = None if force_direct else (forced_proxy or request.query.get("proxy") or None)
+        forced_proxy = (
+            None
+            if force_direct or bypass_proxies
+            else (forced_proxy or request.query.get("proxy") or None)
+        )
         request._ps_forced_proxy = forced_proxy
         session = None
         session_proxy = None

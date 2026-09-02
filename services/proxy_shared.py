@@ -44,6 +44,7 @@ def get_curl_async_session():
     return AsyncSession
 
 import config as _config
+import config_store as _config_store
 from config import (
     get_proxy_for_url,
     get_ssl_setting_for_url,
@@ -150,6 +151,24 @@ def parse_clearkey_params(request) -> str | None:
 
 def seal_clearkey(clearkey: str) -> str:
     return seal_state({"clearkey": clearkey}, "clearkey")
+
+
+def get_extractor_routing_overrides(extractor_key: str | None) -> tuple[bool, bool]:
+    """Return admin WARP/proxy bypass flags for an extractor relay chain."""
+    key = str(extractor_key or "").strip().lower()
+    if not key:
+        return False, False
+
+    base_key = key.replace("_direct", "").replace("_noproxy", "")
+
+    def configured(name: str) -> set[str]:
+        values = _config_store.get(name, [])
+        return {str(value).strip().lower() for value in values if value}
+
+    return (
+        base_key in configured("warp_off_extractors"),
+        base_key in configured("proxy_off_extractors"),
+    )
 
 def check_vavoo_request(headers: dict, request: web.Request, url: str) -> bool:
     return (

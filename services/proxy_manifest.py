@@ -26,6 +26,7 @@ from services.proxy_shared import (
     is_expired_embed_error,
     extractor_name_for_log,
     get_public_base_url,
+    get_extractor_routing_overrides,
 )
 
 
@@ -60,7 +61,17 @@ class HLSProxyManifestHandlerMixin:
         strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(selected_proxy))
         force_direct = self._should_force_direct_from_query(request)
         extractor = None
-        extractor_key = None
+        extractor_key = request.query.get("extractor_key")
+
+        # Keep extractor routing policy when a generated relay URL no longer
+        # carries the original warp=/proxy= flags.
+        admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+        if admin_warp_off:
+            bypass_warp = True
+            BYPASS_WARP_CONTEXT.set(True)
+        if admin_proxy_off:
+            bypass_proxies = True
+            BYPASS_PROXIES_CONTEXT.set(True)
 
         try:
             # --- Gestione URL brevi (Shortened URLs, base64 only) ---
@@ -146,6 +157,29 @@ class HLSProxyManifestHandlerMixin:
             else:
                 extractor = await self.get_extractor(target_url, combined_headers, bypass_warp=bypass_warp)
 
+                # The first resolver call identifies the extractor. Apply its
+                # admin routing policy before the actual extraction, then use a
+                # routing-specific cached extractor instance.
+                extractor_key = self._extractor_key_for_instance(extractor)
+                admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+                routing_changed = False
+                if admin_warp_off and not bypass_warp:
+                    bypass_warp = True
+                    BYPASS_WARP_CONTEXT.set(True)
+                    routing_changed = True
+                if admin_proxy_off and not bypass_proxies:
+                    bypass_proxies = True
+                    BYPASS_PROXIES_CONTEXT.set(True)
+                    routing_changed = True
+                if routing_changed:
+                    selected_proxy = None
+                    SELECTED_PROXY_CONTEXT.set(None)
+                    STRICT_PROXY_CONTEXT.set(False)
+                    extractor = await self.get_extractor(
+                        target_url, combined_headers, bypass_warp=bypass_warp
+                    )
+                    extractor_key = self._extractor_key_for_instance(extractor)
+
                 # ✅ FIX CRITICO: Forza l'aggiornamento degli header dell'estrattore.
                 # Siccome gli estrattori vengono memorizzati in self.extractors (cache),
                 # se non aggiorniamo request_headers, i segmenti successivi userebbero
@@ -171,6 +205,17 @@ class HLSProxyManifestHandlerMixin:
                 captured_manifests = result.get("captured_manifests") or {}
                 force_disable_ssl = result.get("disable_ssl", False)
                 force_direct = result.get("force_direct", force_direct)
+
+                # Re-apply the admin policy after extraction as well: an
+                # extractor result must not remove warp=off/proxy=off before
+                # the manifest and segment URLs are generated.
+                admin_warp_off, admin_proxy_off = get_extractor_routing_overrides(extractor_key)
+                if admin_warp_off:
+                    bypass_warp = True
+                    BYPASS_WARP_CONTEXT.set(True)
+                if admin_proxy_off:
+                    bypass_proxies = True
+                    BYPASS_PROXIES_CONTEXT.set(True)
 
                 # Cattura e sanifica il proxy per evitare double-encoding (%253A -> %3A)
                 raw_proxy = request.query.get("proxy") or result.get("selected_proxy")
@@ -291,6 +336,10 @@ class HLSProxyManifestHandlerMixin:
                     q_params["extractor_key"] = extractor_key
                 if 'stream_key' in locals() and stream_key:
                     q_params["stream_key"] = stream_key
+                if bypass_warp:
+                    q_params["warp"] = "off"
+                if bypass_proxies:
+                    q_params["proxy"] = "off"
 
                 response_data = {
                     "destination_url": stream_url,
