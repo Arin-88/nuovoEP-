@@ -2,6 +2,29 @@
 # Optimized EasyProxy runtime
 # Compatible with AMD64 and ARM64 (Oracle VPS)
 
+# wgx SOCKS5 mode is a userspace WireGuard client: no kernel interface,
+# TUN device, NET_ADMIN, or sysctl is needed.
+FROM debian:bookworm-slim AS wgx-builder
+
+ARG WGX_COMMIT=333b25d79b8cd228b82fa9412b405bb48fced891
+COPY wgx-compat.patch /tmp/wgx-compat.patch
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    curl \
+    libuv1-dev \
+    libsodium-dev \
+    libc-ares-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /tmp/wgx \
+    && curl -fL "https://github.com/wuruxu/wgx/archive/${WGX_COMMIT}.tar.gz" \
+        -o /tmp/wgx.tar.gz \
+    && tar -xzf /tmp/wgx.tar.gz --strip-components=1 -C /tmp/wgx \
+    && patch -d /tmp/wgx -p1 < /tmp/wgx-compat.patch \
+    && make -C /tmp/wgx \
+    && rm -f /tmp/wgx.tar.gz
+
 FROM python:3.12-slim-bookworm
 
 # 1. Environment Settings
@@ -11,39 +34,34 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
-    gnupg \
-    gpg \
     tar \
     nodejs \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    cloudflare-warp \
     netcat-openbsd \
+    procps \
     ffmpeg \
     fonts-dejavu \
     ca-certificates \
+    libuv1 \
+    libsodium23 \
+    libc-ares2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional userspace WARP tools. They allow WARP as a local SOCKS5 proxy
-# without NET_ADMIN or /dev/net/tun when WARP_MODE=wireproxy is selected.
+# WARP config generator. wgx consumes the generated WireGuard profile in
+# userspace and exposes the local SOCKS5 relay.
 ARG WGCF_VERSION=2.2.29
-ARG WIREPROXY_VERSION=1.0.9
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-        amd64) wgcf_arch="amd64"; wireproxy_arch="amd64" ;; \
-        arm64) wgcf_arch="arm64"; wireproxy_arch="arm64" ;; \
-        armhf) wgcf_arch="armv7"; wireproxy_arch="arm" ;; \
-        *) echo "Unsupported architecture for wgcf/wireproxy: $arch" >&2; exit 1 ;; \
+        amd64) wgcf_arch="amd64" ;; \
+        arm64) wgcf_arch="arm64" ;; \
+        armhf) wgcf_arch="armv7" ;; \
+        *) echo "Unsupported architecture for wgcf: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${wgcf_arch}" -o /usr/local/bin/wgcf; \
     chmod +x /usr/local/bin/wgcf; \
-    curl -fL "https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${wireproxy_arch}.tar.gz" -o /tmp/wireproxy.tar.gz; \
-    tar -xzf /tmp/wireproxy.tar.gz -C /tmp; \
-    find /tmp -type f -name wireproxy -exec mv {} /usr/local/bin/wireproxy \; ; \
-    chmod +x /usr/local/bin/wireproxy; \
-    rm -f /tmp/wireproxy.tar.gz
+    mkdir -p /etc/wireguard
+
+COPY --from=wgx-builder /tmp/wgx/wgx /usr/local/bin/wgx
 
 # Install Ookla Speedtest CLI for the admin panel speedtest
 ARG SPEEDTEST_VERSION=1.2.0
@@ -69,7 +87,7 @@ ENV PYTHONPATH=/app
 # Copia esplicita
 COPY . .
 
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh scripts/warp_userspace_ctl.sh
 
 # 5. Metadata & Ports
 LABEL org.opencontainers.image.title="EasyProxy Monolith"

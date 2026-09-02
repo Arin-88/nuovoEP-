@@ -1,5 +1,6 @@
 services:
   easyproxy:
+    build: .
     image: ghcr.io/realbestia1/easyproxy:latest
     container_name: easyproxy
     restart: unless-stopped
