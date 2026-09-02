@@ -24,6 +24,20 @@ const nativeFetch = globalThis.fetch.bind(globalThis);
 const cookies = new Map();
 let proxyDispatcher = null;
 
+// Node 18 provides Blob but not the browser-compatible File global.  VidFast's
+// player bundle only needs the File shape exposed by the browser VM.
+const NativeFile = globalThis.File ?? class File extends Blob {
+  constructor(bits, name, options = {}) {
+    super(bits, options);
+    this.name = String(name);
+    this.lastModified = Number(options.lastModified ?? Date.now());
+  }
+
+  get [Symbol.toStringTag]() {
+    return "File";
+  }
+};
+
 if (process.env.VIDFAST_PROXY && /^https?:\/\//i.test(process.env.VIDFAST_PROXY)) {
   try {
     const { ProxyAgent } = await import("undici");
@@ -195,7 +209,7 @@ const context = {
   atob: value => Buffer.from(value, "base64").toString("binary"),
   btoa: value => Buffer.from(value, "binary").toString("base64"),
   AbortController, AbortSignal, Request, Response, Headers, FormData,
-  ReadableStream, Blob, File, TextEncoderStream, TextDecoderStream,
+  ReadableStream, Blob, File: NativeFile, TextEncoderStream, TextDecoderStream,
   WebAssembly, crypto: globalThis.crypto, navigator, location, document,
   localStorage, sessionStorage, window: null, self: null, globalThis: null, global: null,
   performance: globalThis.performance,
