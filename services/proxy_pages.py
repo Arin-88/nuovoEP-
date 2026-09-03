@@ -38,10 +38,8 @@ class HLSProxyPagesMixin:
 
         try:
             url_param = request.query.get("url")
-
             if not url_param:
                 return web.Response(text="Missing 'url' parameter", status=400)
-
             if not url_param.strip():
                 return web.Response(text="'url' parameter cannot be empty", status=400)
 
@@ -58,15 +56,29 @@ class HLSProxyPagesMixin:
             # ✅ FIX: Passa api_password al builder se presente
             api_password = request.query.get("api_password")
 
-            async def generate_response():
-                async for (
-                    line
-                ) in self.playlist_builder.async_generate_combined_playlist(
-                    playlist_definitions, base_url, api_password=api_password
-                ):
-                    yield line.encode("utf-8")
+            # Genera e raccoglie completamente la playlist in memoria prima di
+            # rispondere, invece di inviarla in streaming (chunked) chunk per
+            # chunk. Alcuni client a valle (es. Cloudflare Worker + APTV)
+            # restano bloccati in attesa su risposte StreamResponse/chunked,
+            # mentre gestiscono correttamente una risposta bufferizzata con
+            # Content-Length. La logica di generazione/riscrittura degli URL
+            # non cambia.
+            #
+            # Ottimizzazione memoria: invece di accumulare stringhe in una
+            # lista e poi fare "".join(...) + .encode("utf-8") (che tiene in
+            # memoria contemporaneamente lista di stringhe + stringa unita +
+            # buffer bytes finale, cioè fino a 3 copie parziali), si accumula
+            # direttamente in un bytearray man mano che le righe arrivano.
+            # Questo mantiene un'unica struttura che cresce in place, con un
+            # picco di memoria inferiore per playlist molto grandi.
+            buf = bytearray()
+            async for line in self.playlist_builder.async_generate_combined_playlist(
+                playlist_definitions, base_url, api_password=api_password
+            ):
+                buf.extend(line.encode("utf-8"))
 
-            response = web.StreamResponse(
+            return web.Response(
+                body=bytes(buf),
                 status=200,
                 headers={
                     "Content-Type": "application/vnd.apple.mpegurl",
@@ -74,14 +86,6 @@ class HLSProxyPagesMixin:
                     "Access-Control-Allow-Origin": "*",
                 },
             )
-
-            await response.prepare(request)
-
-            async for chunk in generate_response():
-                await response.write(chunk)
-
-            await response.write_eof()
-            return response
 
         except (ConnectionResetError, OSError) as e:
             logger.info(f"Playlist download interrupted (client disconnected): {e}")
