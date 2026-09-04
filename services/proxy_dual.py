@@ -245,7 +245,7 @@ class HLSProxyDualMixin:
             str(value).strip().lower()
             for value in config_store.get("proxy_off_extractors", [])
         }
-        if extractor_key in warp_off_extractors or extractor_key == "embedst":
+        if extractor_key in warp_off_extractors:
             warp_off = True
         if extractor_key in proxy_off_extractors:
             proxy_off = True

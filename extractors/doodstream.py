@@ -7,7 +7,7 @@ import time
 from urllib.parse import urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
-from config import get_preferred_proxy_for_url
+from config import BYPASS_WARP_CONTEXT, get_preferred_proxy_for_url
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,17 @@ class DoodStreamExtractor:
         compact_html = re.sub(r"\s+", " ", html[:1200]).strip()
         logger.debug(f"DoodStream compact HTML snippet (first 1200 chars): {compact_html}")
 
-    async def _do_extract_with_proxy(self, embed_url: str, proxy_url: str | None) -> dict | None:
+    async def _do_extract_with_proxy(
+        self,
+        embed_url: str,
+        proxy_url: str | None,
+        bypass_warp: bool = False,
+    ) -> dict | None:
         normalized_proxy = self._normalize_proxy_url(proxy_url) if proxy_url else None
+        if normalized_proxy is None and not (bypass_warp or BYPASS_WARP_CONTEXT.get()):
+            raise ExtractorError(
+                "DoodStream: direct fallback disabled; no proxy route available"
+            )
         self.last_used_proxy = normalized_proxy
         logger.info("DoodStream: curl_cffi using %s", normalized_proxy or "direct connection")
         request_kwargs = {}
@@ -183,6 +192,7 @@ class DoodStreamExtractor:
             result = await self._do_extract_with_proxy(
                 embed_url,
                 await self._get_proxy(embed_url, bypass_warp=bypass_warp),
+                bypass_warp=bypass_warp,
             )
             if result:
                 return result

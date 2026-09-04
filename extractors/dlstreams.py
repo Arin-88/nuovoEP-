@@ -17,6 +17,7 @@ from config import (
     get_connector_for_proxy,
     get_preferred_proxy_for_url,
 )
+import config as _cfg
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,10 @@ class DLStreamsExtractor:
         # Determine the correct proxy for the current state
         target_url = url or self.stream_origin or self.entry_origin
         proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
+        if proxy_url is None and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+            raise aiohttp.ClientConnectionError(
+                "DLStreams: direct fallback disabled; no proxy route available"
+            )
         
         # If we have an existing session, check if its proxy matches what we need now
         if self.session and not self.session.closed:

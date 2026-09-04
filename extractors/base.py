@@ -37,6 +37,10 @@ class BaseExtractor:
         proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES)
 
         async with self._session_lock:
+            if proxy is None and not _cfg.BYPASS_WARP_CONTEXT.get():
+                raise ClientConnectionError(
+                    "No proxy route available; direct fallback disabled"
+                )
             if (
                 self.session is None
                 or self.session.closed
@@ -137,4 +141,3 @@ class BaseExtractor:
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
-

@@ -14,7 +14,6 @@ from config import (
     BYPASS_WARP_CONTEXT,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
-    get_extractor_proxies,
     get_proxy_for_url,
 )
 
@@ -63,7 +62,7 @@ class RoutingOptions:
             proxy_off_extractors = {
                 str(value).lower() for value in config_store.get("proxy_off_extractors", [])
             }
-            if extractor_key in warp_off_extractors or extractor_key == "embedst":
+            if extractor_key in warp_off_extractors:
                 bypass_warp = True
             if extractor_key in proxy_off_extractors:
                 bypass_proxies = True
@@ -73,14 +72,11 @@ class RoutingOptions:
         selected_token = SELECTED_PROXY_CONTEXT.set(None)
         strict_token = STRICT_PROXY_CONTEXT.set(False)
         try:
-            if self.extractor_name and not bypass_proxies:
-                extractor_proxies = get_extractor_proxies(self.extractor_name)
-                if extractor_proxies:
-                    return extractor_proxies[0]
             return get_proxy_for_url(
                 url,
                 bypass_warp=bypass_warp,
                 bypass_proxies=bypass_proxies,
+                extractor_name=self.extractor_name,
             )
         finally:
             BYPASS_WARP_CONTEXT.reset(bypass_warp_token)

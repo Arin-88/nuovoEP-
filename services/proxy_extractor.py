@@ -187,9 +187,9 @@ class HLSProxyExtractorHandlerMixin:
             if extractor_key:
                 base_key = extractor_key.replace("_direct", "").replace("_noproxy", "")
                 
-                # Check warp off. embedst skips WARP by default (it needs direct/non-WARP routing).
+                # Check WARP-off extractor policy.
                 warp_off_list = config_store.get("warp_off_extractors", [])
-                if base_key in warp_off_list or base_key == "embedst":
+                if base_key in warp_off_list:
                     bypass_warp = True
                     BYPASS_WARP_CONTEXT.set(True)
                     logger.debug(f"WARP off for extractor: {base_key}")
@@ -200,7 +200,7 @@ class HLSProxyExtractorHandlerMixin:
                     BYPASS_PROXIES_CONTEXT.set(True)
                     logger.debug(f"Proxy off for extractor: {base_key}")
                     
-                if base_key in warp_off_list or base_key in proxy_off_list or base_key == "embedst":
+                if base_key in warp_off_list or base_key in proxy_off_list:
                     if extractor_key and extractor_key in self.extractors:
                         _old = self.extractors.pop(extractor_key, None)
                         self._extractor_atimes.pop(extractor_key, None)

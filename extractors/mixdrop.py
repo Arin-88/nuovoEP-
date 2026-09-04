@@ -7,9 +7,7 @@ from urllib.parse import urlparse, urljoin
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 
-from config import (
-    get_preferred_proxy_for_url,
-)
+from config import BYPASS_WARP_CONTEXT, get_preferred_proxy_for_url
 import config as _cfg
 from utils.cookie_cache import CookieCache
 
@@ -82,6 +80,10 @@ class MixdropExtractor:
 
         logger.info(f"🔍 [Cache Miss] Extracting new link for: {normalized_url}")
         proxy = await get_preferred_proxy_for_url(normalized_url, "mixdrop", self.proxies, self.bypass_warp_active)
+        if proxy is None and not self.bypass_warp_active and not BYPASS_WARP_CONTEXT.get():
+            raise ExtractorError(
+                "Mixdrop: direct fallback disabled; no proxy route available"
+            )
         try:
             ua, cookies = self.base_headers.get("User-Agent"), {}
             parsed = urlparse(url)
@@ -106,6 +108,10 @@ class MixdropExtractor:
                 try:
                     m_headers = self._step_headers(ua, current_url)
                     pref_p = await get_preferred_proxy_for_url(current_url, "mixdrop", self.proxies, self.bypass_warp_active)
+                    if pref_p is None and not self.bypass_warp_active and not BYPASS_WARP_CONTEXT.get():
+                        raise ExtractorError(
+                            "Mixdrop: direct fallback disabled; no proxy route available"
+                        )
                     cs_proxies = _build_cs_proxies(pref_p)
                     
                     async def fetch_page():

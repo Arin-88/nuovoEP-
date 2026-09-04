@@ -46,6 +46,7 @@ if (process.env.VIDFAST_PROXY && /^https?:\/\//i.test(process.env.VIDFAST_PROXY)
     proxyDispatcher = new ProxyAgent(process.env.VIDFAST_PROXY);
   } catch (error) {
     log("HTTP proxy unavailable:", error.message);
+    throw error;
   }
 }
 

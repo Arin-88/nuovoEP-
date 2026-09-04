@@ -114,14 +114,19 @@ class VidXgoExtractor:
             return proxy_value.replace("socks4a://", "socks4://", 1)
         return proxy_value
 
-    def _get_proxies_for_url(self, url: str) -> list[str]:
-        return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies)
+    def _get_proxies_for_url(self, url: str, bypass_warp: bool = False) -> list[str]:
+        return get_ordered_proxies_for_url(
+            url,
+            self.extractor_name,
+            self.proxies,
+            bypass_warp=bypass_warp,
+        )
 
     # ------------------------------------------------------------------ fetch
 
     async def _fetch(self, url: str, headers: dict, bypass_warp: bool = False) -> str:
         """GET `url`; ruota i Referer whitelistati se necessario."""
-        paths = self._get_proxies_for_url(url)
+        paths = self._get_proxies_for_url(url, bypass_warp=bypass_warp)
         if should_allow_direct_fallback(paths, bypass_warp=bypass_warp):
             paths.append(None)
         logger.info(
