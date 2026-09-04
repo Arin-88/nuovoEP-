@@ -128,8 +128,18 @@ class VixSrcExtractor:
             alive = [p for p in dedicated if p not in DEAD_PROXIES or now >= DEAD_PROXIES.get(p, 0)]
         if alive:
             return alive
-        # All dedicated proxies dead — fall back to general resolution (direct, WARP, etc.)
-        return get_ordered_proxies_for_url(url, self.extractor_name, fallback, bypass_warp=self.bypass_warp_active)
+        # All dedicated proxies dead — fall back to general proxy/WARP resolution.
+        dedicated_set = set(dedicated)
+        general_fallback = [
+            proxy for proxy in (self.proxies or [])
+            if self._normalize_proxy_url(proxy) not in dedicated_set
+        ]
+        return get_ordered_proxies_for_url(
+            url,
+            "",
+            general_fallback,
+            bypass_warp=self.bypass_warp_active,
+        )
 
     async def _preferred_proxy(self, url: str, forced_proxy: str | None = None) -> str | None:
         candidates = await self._proxy_candidates(url, forced_proxy)
@@ -191,7 +201,10 @@ class VixSrcExtractor:
         # If a proxy is configured, respect it. Direct is only allowed when no
         # proxy route exists; otherwise direct can win the curl_cffi race and
         # produce tokens for a different IP than streaming uses.
-        if not self._has_strict_proxy_source(forced_proxy) and should_allow_direct_fallback(proxies_to_try):
+        if not self._has_strict_proxy_source(forced_proxy) and should_allow_direct_fallback(
+            proxies_to_try,
+            bypass_warp=self.bypass_warp_active,
+        ):
             proxies_to_try.append(None)
 
         impersonations = ["chrome131", "chrome124", "chrome120"]

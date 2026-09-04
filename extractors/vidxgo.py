@@ -113,11 +113,16 @@ class VidXgoExtractor:
 
     # ------------------------------------------------------------------ fetch
 
-    async def _fetch(self, url: str, headers: dict) -> str:
+    async def _fetch(self, url: str, headers: dict, bypass_warp: bool = False) -> str:
         """GET `url`; ruota i Referer whitelistati se necessario."""
         paths = self._get_proxies_for_url(url)
-        if should_allow_direct_fallback(paths):
+        if should_allow_direct_fallback(paths, bypass_warp=bypass_warp):
             paths.append(None)
+        logger.info(
+            "vidxgo fetch routes for %s: %s",
+            url,
+            ", ".join(proxy or "direct" for proxy in paths) or "none",
+        )
         last_error = None
         for proxy in paths:
             timeout = ClientTimeout(total=25, connect=10, sock_read=20)
@@ -205,7 +210,7 @@ class VidXgoExtractor:
         bypass_warp = bool(kwargs.get("bypass_warp"))
         # 1. Fetch embed page.
         embed_headers = {**self.embed_headers, **{k.lower(): v for k, v in request_headers.items() if k.lower() == "cookie"}}
-        html = await self._fetch(url, embed_headers)
+        html = await self._fetch(url, embed_headers, bypass_warp=bypass_warp)
         if not html:
             raise ExtractorError(f"VidXgo: empty embed page for {url}")
 
@@ -214,7 +219,7 @@ class VidXgoExtractor:
         logger.info(f"vidxgo: extracted m3u8 for {url} -> {m3u8_url[:80]}...")
 
         # 3. Fetch master + each referenced variant playlist.
-        master_text = await self._fetch(m3u8_url, playback_headers)
+        master_text = await self._fetch(m3u8_url, playback_headers, bypass_warp=bypass_warp)
         if "#EXTM3U" not in master_text:
             raise ExtractorError("VidXgo: extracted URL did not return a valid HLS manifest")
 
@@ -239,7 +244,7 @@ class VidXgoExtractor:
 
         for v_url in variant_urls:
             try:
-                v_text = await self._fetch(v_url, playback_headers)
+                v_text = await self._fetch(v_url, playback_headers, bypass_warp=bypass_warp)
                 captured_map[v_url] = v_text
             except Exception as e:
                 logger.warning(f"vidxgo: variant fetch failed {v_url[:80]}...: {e}")

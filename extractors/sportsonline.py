@@ -207,23 +207,11 @@ class SportsonlineExtractor:
             except (ssl.SSLError, ClientOSError) as e:
                 logger.warning(f"SSL/OS error attempt {attempt + 1} for {url}: {str(e)}")
                 if self._session_proxy:
-                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying direct...")
+                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying without direct fallback...")
                     if self.session and not self.session.closed:
                         await self.session.close()
                     self.session = None
                     self._session_proxy = None
-                    session = await self._get_session(url, force_direct=True)
-                    try:
-                        async with session.get(url, headers=final_headers, timeout=timeout) as response:
-                            response.raise_for_status()
-                            html = await self._handle_response_content(response)
-                            if not html:
-                                raise ExtractorError(f"Empty response for {url}")
-                            logger.info(f"Direct connection succeeded for {url} after SSL error")
-                            return html, str(response.url)
-                    except Exception as direct_err:
-                        logger.warning(f"Direct connection also failed for {url}: {str(direct_err)}")
-                        raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:

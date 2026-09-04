@@ -793,7 +793,13 @@ class HLSProxyStreamingMixin:
                         stream_url, bypass_warp=True, forced_proxy=None,
                     )
 
-                # 1) Direct retry of same URL via new proxy
+                if not rot_proxy or rot_proxy == old_proxy:
+                    if rot_session and not rot_session.closed:
+                        await rot_session.close()
+                    logger.warning("Proxy rotation: no alternate proxy; direct fallback disabled")
+                    return None
+
+                # 1) Retry same URL via alternate proxy
                 try:
                     rot_target = yarl.URL(stream_url, encoded=True) if not is_special_cdn else urllib.parse.unquote(stream_url)
                     async with rot_session.get(rot_target, headers=headers, ssl=not disable_ssl, timeout=segment_timeout) as rot_resp:

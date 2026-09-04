@@ -469,12 +469,21 @@ def get_ordered_proxies_for_url(
     return ProxyList(ordered, strict=False)
 
 
-def should_allow_direct_fallback(proxies: list | None) -> bool:
-    """Allow direct fallback only when no proxy exists."""
+def should_allow_direct_fallback(
+    proxies: list | None,
+    bypass_warp: bool | None = None,
+) -> bool:
+    """Allow direct only when explicitly bypassing WARP and no proxy exists."""
     if getattr(proxies, "strict", False):
         return False
     active = [proxy for proxy in proxies or [] if proxy]
-    return not active
+    if active:
+        return False
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
+    # WARP enabled means failed proxy routes must fail closed, never leak to
+    # the VPS public IP. Direct remains available only for explicit warp=off.
+    return bool(bypass_warp) or not _get_dynamic_warp_enabled()
 
 
 async def get_preferred_proxy_for_url(
@@ -491,7 +500,12 @@ async def get_preferred_proxy_for_url(
     result = await find_first_alive_async(ordered)
     if result:
         SELECTED_PROXY_CONTEXT.set(result)
-    return result
+        return result
+    effective_bypass_warp = BYPASS_WARP_CONTEXT.get() if bypass_warp is None else bypass_warp
+    if _get_dynamic_warp_enabled() and not effective_bypass_warp and not _is_warp_excluded(url or ""):
+        # Fail through WARP connector; never silently fall back to direct.
+        return WARP_PROXY_URL
+    return None
 
 
 async def get_preferred_proxy_for_url_async(
@@ -508,7 +522,12 @@ async def get_preferred_proxy_for_url_async(
     result = await find_first_alive_async(ordered)
     if result:
         SELECTED_PROXY_CONTEXT.set(result)
-    return result
+        return result
+    effective_bypass_warp = BYPASS_WARP_CONTEXT.get() if bypass_warp is None else bypass_warp
+    if _get_dynamic_warp_enabled() and not effective_bypass_warp and not _is_warp_excluded(url or ""):
+        # Fail through WARP connector; never silently fall back to direct.
+        return WARP_PROXY_URL
+    return None
 
 
 DEAD_PROXIES = {}  # proxy_url -> expire_time
@@ -681,8 +700,9 @@ def get_proxy_for_url(
         is_excluded = _is_warp_excluded(url) if url else False
         if _ENABLE_WARP and not bypass_warp and not is_excluded:
             warp_alive = is_proxy_alive(_WARP_PROXY_URL)
-            if warp_alive:
-                return _WARP_PROXY_URL
+            if not warp_alive:
+                logger.warning("WARP health check failed; keeping strict WARP route for %s", url)
+            return _WARP_PROXY_URL
         return None
 
     _WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
@@ -756,9 +776,9 @@ def get_proxy_for_url(
 
     if _ENABLE_WARP and not bypass_warp and not is_excluded:
         warp_alive = is_proxy_alive(_WARP_PROXY_URL)
-        if warp_alive:
-            return _WARP_PROXY_URL
-        return None
+        if not warp_alive:
+            logger.warning("WARP health check failed; keeping strict WARP route for %s", url)
+        return _WARP_PROXY_URL
 
     proxy = SELECTED_PROXY_CONTEXT.get()
     if proxy and is_proxy_alive(proxy):
