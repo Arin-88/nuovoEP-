@@ -596,7 +596,7 @@ class HLSProxyCoreMixin:
                     await p_sess.close()
 
         proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
-        if not proxy and not bypass_warp:
+        if not proxy and not _config.is_direct_connection_allowed(bypass_warp):
             raise aiohttp.ClientConnectionError(
                 "No proxy route available; direct fallback disabled"
             )

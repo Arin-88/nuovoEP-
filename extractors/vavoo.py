@@ -76,7 +76,7 @@ class VavooExtractor:
                     BYPASS_WARP_CONTEXT.get(),
                 )
 
-            if self._proxy is None and not BYPASS_WARP_CONTEXT.get():
+            if self._proxy is None and not _cfg.is_direct_connection_allowed():
                 raise ClientConnectionError(
                     "Vavoo: direct fallback disabled; no proxy route available"
                 )

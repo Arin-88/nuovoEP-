@@ -35,7 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.15"
+APP_VERSION = "2.11.16"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -343,6 +343,12 @@ def get_transport_route_proxy(url: str, transport_routes: list) -> str | None:
 def _get_dynamic_warp_enabled() -> bool:
     return _cfg_get("enable_warp", False)
 
+def is_direct_connection_allowed(bypass_warp: bool | None = None) -> bool:
+    """Allow direct only when WARP is explicitly bypassed or disabled in admin."""
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
+    return bool(bypass_warp or not _get_dynamic_warp_enabled())
+
 def _get_dynamic_warp_exclude_domains() -> list:
     defaults = _cfg_get("warp_exclude_domains", [])
     custom = _cfg_get("warp_exclude_domains_custom", [])
@@ -480,7 +486,7 @@ def should_allow_direct_fallback(
     proxies: list | None,
     bypass_warp: bool | None = None,
 ) -> bool:
-    """Allow direct only when explicitly bypassing WARP and no proxy exists."""
+    """Allow direct when WARP is bypassed/disabled and no proxy exists."""
     if getattr(proxies, "strict", False):
         return False
     active = [proxy for proxy in proxies or [] if proxy]
@@ -488,9 +494,8 @@ def should_allow_direct_fallback(
         return False
     if bypass_warp is None:
         bypass_warp = BYPASS_WARP_CONTEXT.get()
-    # Direct is an explicit opt-in only. A disabled WARP route with no explicit
-    # bypass still fails closed instead of leaking the VPS public IP.
-    return bool(bypass_warp)
+    # Direct is allowed when WARP is explicitly bypassed or disabled in admin.
+    return is_direct_connection_allowed(bypass_warp)
 
 
 async def get_preferred_proxy_for_url(

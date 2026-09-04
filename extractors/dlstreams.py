@@ -201,7 +201,7 @@ class DLStreamsExtractor:
         # Determine the correct proxy for the current state
         target_url = url or self.stream_origin or self.entry_origin
         proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
-        if proxy_url is None and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+        if proxy_url is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise aiohttp.ClientConnectionError(
                 "DLStreams: direct fallback disabled; no proxy route available"
             )

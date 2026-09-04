@@ -37,7 +37,7 @@ class BaseExtractor:
         proxy = await get_preferred_proxy_for_url(url, self.extractor_name, self.proxies or _cfg.GLOBAL_PROXIES)
 
         async with self._session_lock:
-            if proxy is None and not _cfg.BYPASS_WARP_CONTEXT.get():
+            if proxy is None and not _cfg.is_direct_connection_allowed():
                 raise ClientConnectionError(
                     "No proxy route available; direct fallback disabled"
                 )
