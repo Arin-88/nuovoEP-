@@ -84,6 +84,11 @@ ENV FLARESOLVERR_LOG_LEVEL=error
 # Copia esplicita
 COPY . .
 
+# FlareSolverr uses this Docker marker to avoid downloading an
+# undetected_chromedriver binary for the wrong CPU architecture. Debian's
+# chromedriver comes from the same package set as Chromium above.
+RUN ln -sf "$(command -v chromedriver)" /app/chromedriver
+
 RUN chmod +x entrypoint.sh scripts/warp_userspace_ctl.sh
 
 # 5. Metadata & Ports
