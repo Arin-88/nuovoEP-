@@ -15,6 +15,7 @@ import shlex
 import shutil
 import signal
 import sys
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit
@@ -74,6 +75,8 @@ class FlareSolverrManager:
         self._process: asyncio.subprocess.Process | None = None
         self._owns_process = False
         self._session: aiohttp.ClientSession | None = None
+        self._process_output: deque[str] = deque(maxlen=80)
+        self._output_task: asyncio.Task | None = None
 
     @property
     def api_url(self) -> str:
@@ -115,6 +118,32 @@ class FlareSolverrManager:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             return False
 
+    async def _capture_process_output(self, stream) -> None:
+        if stream is None:
+            return
+        try:
+            async for raw_line in stream:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if line:
+                    self._process_output.append(line)
+        except (asyncio.CancelledError, OSError):
+            return
+
+    async def _finish_process_output(self) -> None:
+        if self._output_task is None:
+            return
+        task = self._output_task
+        self._output_task = None
+        try:
+            await task
+        except (asyncio.CancelledError, OSError):
+            pass
+
+    def _process_diagnostic(self) -> str:
+        if not self._process_output:
+            return ""
+        return " | ".join(self._process_output)[-4000:]
+
     async def _start(self) -> None:
         if self._process is not None and self._process.returncode is None:
             return
@@ -150,16 +179,20 @@ class FlareSolverrManager:
             raise FlareSolverrError(f"FlareSolverr API non raggiungibile: {self.api_url}")
 
         try:
+            self._process_output.clear()
             self._process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=os.getenv("FLARESOLVERR_DIR", "/opt/flaresolverr"),
                 env=env,
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 start_new_session=os.name != "nt",
             )
             self._owns_process = True
+            self._output_task = asyncio.create_task(
+                self._capture_process_output(self._process.stdout)
+            )
         except (OSError, ValueError) as exc:
             raise FlareSolverrError(f"Avvio FlareSolverr fallito: {exc}") from exc
 
@@ -168,8 +201,11 @@ class FlareSolverrManager:
         )
         while asyncio.get_running_loop().time() < deadline:
             if self._process.returncode is not None:
+                await self._finish_process_output()
+                diagnostic = self._process_diagnostic()
+                suffix = f": {diagnostic}" if diagnostic else ""
                 raise FlareSolverrError(
-                    f"FlareSolverr terminato subito (exit={self._process.returncode})"
+                    f"FlareSolverr terminato subito (exit={self._process.returncode}){suffix}"
                 )
             if await self._api_available():
                 logger.info("FlareSolverr avviato on-demand su 127.0.0.1:%s", api_port)
@@ -205,6 +241,8 @@ class FlareSolverrManager:
                         await process.wait()
                     except (ProcessLookupError, OSError):
                         pass
+
+        await self._finish_process_output()
 
         # FlareSolverr can leave Chromium outside its process group.  Only
         # target its temporary browser profiles, never a user's normal browser.
