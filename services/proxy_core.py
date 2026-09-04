@@ -577,6 +577,11 @@ class HLSProxyCoreMixin:
             if forced_proxy.lower() == "off":
                 forced_proxy = None
 
+        # proxy=off disables configured/forced proxies. Keep a forced proxy
+        # active when only WARP is bypassed: proxies command over WARP.
+        if _shared.BYPASS_PROXIES_CONTEXT.get():
+            forced_proxy = None
+
         # Stale proxy sessions cleanup (>60s idle, aligned with connector keepalive_timeout).
         # WARP session stays pooled, but its connector never keeps upstream TCP
         # connections alive; the WireProxy process/tunnel remains available.
@@ -591,6 +596,10 @@ class HLSProxyCoreMixin:
                     await p_sess.close()
 
         proxy = forced_proxy or get_proxy_for_url(url, bypass_warp=bypass_warp)
+        if not proxy and not bypass_warp:
+            raise aiohttp.ClientConnectionError(
+                "No proxy route available; direct fallback disabled"
+            )
         if proxy == _shared.WARP_PROXY_URL:
             # Refresh on every real request, not only when the pooled session
             # is created; this prevents recycling during an active HLS stream.

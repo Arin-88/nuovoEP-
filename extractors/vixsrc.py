@@ -50,17 +50,16 @@ class VixSrcExtractor:
             len(self.proxies or []),
         )
 
-    @staticmethod
-    async def _refresh_vixsrc_domain() -> None:
+    async def _refresh_vixsrc_domain(self) -> None:
         global _vixsrc_domain, _vixsrc_config_loaded_at
         if time.monotonic() - _vixsrc_config_loaded_at < 60:
             return
         try:
-            timeout = ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(VIXSRC_CONFIG_URL) as response:
-                    response.raise_for_status()
-                    config = await response.json(content_type=None)
+            response = await self._make_curl_request(
+                VIXSRC_CONFIG_URL,
+                headers={"Accept": "application/json"},
+            )
+            config = json.loads(response.text)
             domain = str(config.get("vixsrc", "")).strip().lower()
             if domain:
                 _vixsrc_domain = domain.removeprefix("https://").removeprefix("http://").rstrip("/")
@@ -111,25 +110,25 @@ class VixSrcExtractor:
     async def _proxy_candidates(self, url: str, forced_proxy: str | None = None) -> list[str]:
         if forced_proxy:
             proxy = self._normalize_proxy_url(forced_proxy)
+            if self.bypass_warp_active and proxy == self._normalize_proxy_url(WARP_PROXY_URL):
+                return []
             return [proxy]
 
-        # Filter out WARP from fallback proxies when bypass is active
-        fallback = self.proxies
-        if self.bypass_warp_active and WARP_PROXY_URL:
-            fallback = [p for p in (self.proxies or []) if p != WARP_PROXY_URL and p != self._normalize_proxy_url(WARP_PROXY_URL)]
-
-        dedicated = self._dedicated_proxies()
-        if not dedicated:
-            return get_ordered_proxies_for_url(url, self.extractor_name, fallback, bypass_warp=self.bypass_warp_active)
-
-        # Skip socket check - rely on DEAD_PROXIES + curl_cffi rotation for liveness
+        # The central resolver owns route priority. Filter only routes already
+        # marked dead; keep the remaining candidates in resolver order so a
+        # failed per-extractor proxy can fall through to global/WARP.
+        candidates = get_ordered_proxies_for_url(
+            url,
+            self.extractor_name,
+            self.proxies,
+            bypass_warp=self.bypass_warp_active,
+        )
         now = time.time()
         with _proxy_lock:
-            alive = [p for p in dedicated if p not in DEAD_PROXIES or now >= DEAD_PROXIES.get(p, 0)]
-        if alive:
-            return alive
-        # All dedicated proxies dead — fall back to general resolution (direct, WARP, etc.)
-        return get_ordered_proxies_for_url(url, self.extractor_name, fallback, bypass_warp=self.bypass_warp_active)
+            return [
+                proxy for proxy in candidates
+                if proxy not in DEAD_PROXIES or now >= DEAD_PROXIES.get(proxy, 0)
+            ]
 
     async def _preferred_proxy(self, url: str, forced_proxy: str | None = None) -> str | None:
         candidates = await self._proxy_candidates(url, forced_proxy)
@@ -176,8 +175,10 @@ class VixSrcExtractor:
                     raise ExtractorError(f"curl_cffi HTTP error {self.status} for {self.url}")
 
         proxies_to_try = await self._proxy_candidates(url, forced_proxy)
-        if not proxies_to_try and self._has_strict_proxy_source(forced_proxy):
-            raise ExtractorError("No alive VixSrc dedicated/forced proxy available")
+        if not proxies_to_try and forced_proxy:
+            raise ExtractorError("No alive VixSrc forced proxy available")
+        if not proxies_to_try and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+            raise ExtractorError("No alive VixSrc proxy route available; direct fallback disabled")
         preferred_proxy = proxies_to_try[0] if proxies_to_try else None
         logger.info(
             "VixSrc curl proxy lookup: url=%s transport_routes=%d dedicated_proxies=%d fallback_proxies=%d resolved=%d preferred_proxy=%s",
@@ -188,10 +189,12 @@ class VixSrcExtractor:
             len(proxies_to_try),
             preferred_proxy,
         )
-        # If a proxy is configured, respect it. Direct is only allowed when no
-        # proxy route exists; otherwise direct can win the curl_cffi race and
-        # produce tokens for a different IP than streaming uses.
-        if not self._has_strict_proxy_source(forced_proxy) and should_allow_direct_fallback(proxies_to_try):
+        # Direct is an explicit WARP-off opt-in only, and never a fallback for
+        # an explicitly forced proxy.
+        if not forced_proxy and should_allow_direct_fallback(
+            proxies_to_try,
+            bypass_warp=self.bypass_warp_active,
+        ):
             proxies_to_try.append(None)
 
         impersonations = ["chrome131", "chrome124", "chrome120"]
@@ -204,8 +207,6 @@ class VixSrcExtractor:
         final_headers.pop("user-agent", None)
 
         timeout = _cfg.PROXY_TEST_TIMEOUT
-        concurrency = _cfg.PROXY_TEST_CONCURRENCY
-
         async def _try_one(proxy_value: str | None, imp: str):
             request_kwargs = {}
             proxy = self._normalize_proxy_url(proxy_value) if proxy_value else None
@@ -231,51 +232,27 @@ class VixSrcExtractor:
                     mark_proxy_dead(proxy_value)
                 return False, proxy, None, exc, None
 
-        specific = [p for p in get_extractor_proxies(self.extractor_name) if p in proxies_to_try]
-        proxy_batches = [specific, [p for p in proxies_to_try if p not in specific]] if specific else [proxies_to_try]
-
         for imp in impersonations:
             if asyncio.current_task().cancelled():
                 logger.info("Extraction cancelled, skipping remaining impersonations for %s", url)
                 raise asyncio.CancelledError()
             logger.info(
-                "VixSrc curl_cffi testing %d proxies for %s (imp=%s, concurrency=%d, timeout=%ss)",
-                len(proxies_to_try), url, imp, concurrency, timeout,
+                "VixSrc curl_cffi testing %d routes in priority order for %s (imp=%s, timeout=%ss)",
+                len(proxies_to_try), url, imp, timeout,
             )
-            semaphore = asyncio.Semaphore(concurrency)
-
-            async def _limited(proxy_value):
-                async with semaphore:
-                    return await _try_one(proxy_value, imp)
-
-            for proxy_batch in proxy_batches:
-                if not proxy_batch:
-                    continue
-                tasks = [asyncio.create_task(_limited(proxy_value)) for proxy_value in proxy_batch]
-                try:
-                    for task in asyncio.as_completed(tasks):
-                        ok, proxy, response, exc, status = await task
-                        if ok:
-                            for pending in tasks:
-                                if not pending.done():
-                                    pending.cancel()
-                            await asyncio.gather(*tasks, return_exceptions=True)
-                            self.last_used_proxy = proxy
-                            self.last_used_direct = proxy is None
-                            logger.info("curl_cffi success via %s for %s (imp=%s)", proxy or "direct", url, imp)
-                            return response
-                        if isinstance(status, int):
-                            last_status = status
-                        if exc:
-                            last_error = exc
-                finally:
-                    for pending in tasks:
-                        if not pending.done():
-                            pending.cancel()
-                    try:
-                        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=3)
-                    except asyncio.TimeoutError:
-                        pass
+            # Preserve resolver priority. A parallel race can let a lower
+            # priority global proxy win before the configured route/file proxy.
+            for proxy_value in proxies_to_try:
+                ok, proxy, response, exc, status = await _try_one(proxy_value, imp)
+                if ok:
+                    self.last_used_proxy = proxy
+                    self.last_used_direct = proxy is None
+                    logger.info("curl_cffi success via %s for %s (imp=%s)", proxy or "direct", url, imp)
+                    return response
+                if isinstance(status, int):
+                    last_status = status
+                if exc:
+                    last_error = exc
 
         if last_error:
             raise ExtractorError(f"curl_cffi request failed for {url}: {last_error}")
@@ -350,6 +327,10 @@ class VixSrcExtractor:
             proxy = self._get_random_proxy()
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
+        if proxy is None and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+            raise aiohttp.ClientConnectionError(
+                "VixSrc: direct fallback disabled; no proxy route available"
+            )
         self.last_used_proxy = proxy
         self.last_used_direct = proxy is None
 

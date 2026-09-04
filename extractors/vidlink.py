@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 from curl_cffi.requests import AsyncSession
 from nacl.secret import SecretBox
 
-from config import get_preferred_proxy_for_url
+from config import BYPASS_WARP_CONTEXT, get_preferred_proxy_for_url
 from extractors.base import ExtractorError
 
 logger = logging.getLogger(__name__)
@@ -144,9 +144,14 @@ class VidLinkExtractor:
             "Referer": "https://vidlink.pro/",
             "X-Playback-Environment": "dash-hevc",
         }
+        bypass_warp = bool(kwargs.get("bypass_warp"))
         proxy = await get_preferred_proxy_for_url(
-            api_url, self.extractor_name, self.proxies, kwargs.get("bypass_warp")
+            api_url, self.extractor_name, self.proxies, bypass_warp
         )
+        if proxy is None and not (bypass_warp or BYPASS_WARP_CONTEXT.get()):
+            raise ExtractorError(
+                "VidLink: direct fallback disabled; no proxy route available"
+            )
         request_kwargs = {}
         if proxy:
             proxy = self._normalize_proxy_url(proxy)

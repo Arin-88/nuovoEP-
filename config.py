@@ -1,7 +1,6 @@
 import os
 import shutil
 import logging
-import random
 import socket
 import time
 import asyncio
@@ -36,7 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.13"
+APP_VERSION = "2.11.14"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -231,8 +230,6 @@ async def find_first_alive_async(proxies: list, concurrency: int | None = None) 
     """Test proxies in priority order with a staggered start, returning the highest-priority alive proxy."""
     if not proxies:
         return None
-    if getattr(proxies, "strict", False):
-        return proxies[0]
     concurrency = concurrency or PROXY_TEST_CONCURRENCY
     # Filter out globally dead proxies first
     now = time.time()
@@ -397,8 +394,15 @@ def get_ordered_proxies_for_url(
     fallback_proxies: list | None = None,
     bypass_warp: bool | None = None,
     bypass_proxies: bool | None = None,
+    transport_routes: list | None = None,
+    global_proxies: list | None = None,
 ) -> list[str]:
-    """Build proxy priority: extractor-specific, TRANSPORT_ROUTES, fallback/global, WARP."""
+    """Build the single routing chain used by every extractor/service.
+
+    Priority is matching transport route, extractor proxy file,
+    selected/fallback proxies, global proxies, then WARP. WARP is deliberately
+    deferred even when it appears in a supplied fallback list.
+    """
     if bypass_proxies is None:
         bypass_proxies = BYPASS_PROXIES_CONTEXT.get() or _is_proxy_excluded(url or "")
 
@@ -427,41 +431,44 @@ def get_ordered_proxies_for_url(
         if proxy and proxy not in ordered:
             ordered.append(proxy)
 
-    _WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
-    _GLOBAL_PROXIES = _get_dynamic_global_proxies()
-    _TRANSPORT_ROUTES = _get_dynamic_transport_routes()
+    _GLOBAL_PROXIES = _get_dynamic_global_proxies() if global_proxies is None else global_proxies
+    _TRANSPORT_ROUTES = _get_dynamic_transport_routes() if transport_routes is None else transport_routes
 
     selected_proxy = SELECTED_PROXY_CONTEXT.get()
     selected_proxy_is_strict = STRICT_PROXY_CONTEXT.get()
-    if selected_proxy and selected_proxy_is_strict:
+    if (
+        selected_proxy
+        and selected_proxy_is_strict
+        and not (bypass_warp and selected_proxy == _WARP_PROXY_URL)
+    ):
         return build([selected_proxy], strict=True)
-
-    extractor_proxies = get_extractor_proxies(extractor_name or "")
-    if extractor_proxies:
-        return build(extractor_proxies, strict=True)
 
     if url and _TRANSPORT_ROUTES:
         normalized_url = url.lower()
         for route in _TRANSPORT_ROUTES:
             url_pattern = route["url"].lower()
             if url_pattern in normalized_url:
-                proxy_value = route.get("proxy")
-                if not proxy_value:
-                    return ProxyList([], strict=False)
-                return build([proxy_value], strict=True)
+                add(route.get("proxy"))
+                break
 
-    if selected_proxy:
+    extractor_proxies = get_extractor_proxies(extractor_name or "")
+    for proxy in extractor_proxies:
+        if proxy != _WARP_PROXY_URL:
+            add(proxy)
+
+    if selected_proxy and selected_proxy != _WARP_PROXY_URL:
         add(selected_proxy)
 
     for proxy in fallback_proxies or []:
-        add(proxy)
+        if proxy != _WARP_PROXY_URL:
+            add(proxy)
 
     for proxy in _GLOBAL_PROXIES:
-        add(proxy)
+        if proxy != _WARP_PROXY_URL:
+            add(proxy)
 
     if bypass_warp is None:
         bypass_warp = BYPASS_WARP_CONTEXT.get()
-    normalized_url = (url or "").lower()
     is_excluded = _is_warp_excluded(url or "")
     if _ENABLE_WARP and not bypass_warp and not is_excluded:
         add(_WARP_PROXY_URL)
@@ -469,12 +476,21 @@ def get_ordered_proxies_for_url(
     return ProxyList(ordered, strict=False)
 
 
-def should_allow_direct_fallback(proxies: list | None) -> bool:
-    """Allow direct fallback only when no proxy exists."""
+def should_allow_direct_fallback(
+    proxies: list | None,
+    bypass_warp: bool | None = None,
+) -> bool:
+    """Allow direct only when explicitly bypassing WARP and no proxy exists."""
     if getattr(proxies, "strict", False):
         return False
     active = [proxy for proxy in proxies or [] if proxy]
-    return not active
+    if active:
+        return False
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
+    # Direct is an explicit opt-in only. A disabled WARP route with no explicit
+    # bypass still fails closed instead of leaking the VPS public IP.
+    return bool(bypass_warp)
 
 
 async def get_preferred_proxy_for_url(
@@ -491,7 +507,16 @@ async def get_preferred_proxy_for_url(
     result = await find_first_alive_async(ordered)
     if result:
         SELECTED_PROXY_CONTEXT.set(result)
-    return result
+        return result
+    if getattr(ordered, "strict", False):
+        # An explicit proxy is a caller override, not a candidate for silent
+        # WARP/direct substitution.
+        return ordered[0]
+    effective_bypass_warp = BYPASS_WARP_CONTEXT.get() if bypass_warp is None else bypass_warp
+    if _get_dynamic_warp_enabled() and not effective_bypass_warp and not _is_warp_excluded(url or ""):
+        # Fail through WARP connector; never silently fall back to direct.
+        return WARP_PROXY_URL
+    return None
 
 
 async def get_preferred_proxy_for_url_async(
@@ -508,7 +533,14 @@ async def get_preferred_proxy_for_url_async(
     result = await find_first_alive_async(ordered)
     if result:
         SELECTED_PROXY_CONTEXT.set(result)
-    return result
+        return result
+    if getattr(ordered, "strict", False):
+        return ordered[0]
+    effective_bypass_warp = BYPASS_WARP_CONTEXT.get() if bypass_warp is None else bypass_warp
+    if _get_dynamic_warp_enabled() and not effective_bypass_warp and not _is_warp_excluded(url or ""):
+        # Fail through WARP connector; never silently fall back to direct.
+        return WARP_PROXY_URL
+    return None
 
 
 DEAD_PROXIES = {}  # proxy_url -> expire_time
@@ -529,7 +561,11 @@ def is_proxy_alive(proxy_url: str, force_check: bool = False) -> bool:
                 return False
             DEAD_PROXIES.pop(proxy_url, None)
 
-    if not _socket_check(proxy_url, timeout=5):
+    try:
+        alive = _socket_check(proxy_url, timeout=5)
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        alive = False
+    if not alive:
         logging.warning(f"Proxy {proxy_url} is NOT reachable.")
         return False
     return True
@@ -663,117 +699,43 @@ def get_proxy_for_url(
     global_proxies: list = None,
     bypass_warp: bool = None,
     bypass_proxies: bool = None,
+    extractor_name: str = "",
 ) -> str:
-    """Trova il proxy appropriato per un URL basato su TRANSPORT_ROUTES e impostazioni WARP.
-    
-    If transport_routes or global_proxies are None, reads from dynamic config_store.
+    """Return the first alive route from the common priority chain.
+
+    If every candidate is down, return a configured candidate so the caller
+    fails through that route; returning ``None`` would silently enable direct.
     """
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
     if bypass_proxies is None:
         bypass_proxies = BYPASS_PROXIES_CONTEXT.get() or _is_proxy_excluded(url or "")
 
-    if bypass_warp is None:
-        bypass_warp = BYPASS_WARP_CONTEXT.get()
-    
-    _ENABLE_WARP = _get_dynamic_warp_enabled()
-    _WARP_PROXY_URL = WARP_PROXY_URL
-
-    if bypass_proxies:
-        is_excluded = _is_warp_excluded(url) if url else False
-        if _ENABLE_WARP and not bypass_warp and not is_excluded:
-            warp_alive = is_proxy_alive(_WARP_PROXY_URL)
-            if warp_alive:
-                return _WARP_PROXY_URL
+    ordered = get_ordered_proxies_for_url(
+        url,
+        extractor_name=extractor_name,
+        bypass_warp=bypass_warp,
+        bypass_proxies=bypass_proxies,
+        transport_routes=transport_routes,
+        global_proxies=global_proxies,
+    )
+    if not ordered:
         return None
 
-    _WARP_EXCLUDE_DOMAINS = _get_dynamic_warp_exclude_domains()
-    if transport_routes is None:
-        transport_routes = _get_dynamic_transport_routes()
-    if global_proxies is None:
-        global_proxies = _get_dynamic_global_proxies()
-
-    if not url:
-        selected_proxy = SELECTED_PROXY_CONTEXT.get()
-        if selected_proxy and STRICT_PROXY_CONTEXT.get():
-            return selected_proxy
-
-    stream_key = _get_stream_key(url)
-
-    normalized_url = url.lower()
-
-    proxy = SELECTED_PROXY_CONTEXT.get()
-    if proxy and STRICT_PROXY_CONTEXT.get():
-        return proxy
-
-    if transport_routes:
-        for route in transport_routes:
-            url_pattern = route["url"].lower()
-            if url_pattern in normalized_url:
-                proxy_value = route.get("proxy")
-                if not proxy_value:
-                    return None
-                STRICT_PROXY_CONTEXT.set(True)
-                SELECTED_PROXY_CONTEXT.set(proxy_value)
-                return proxy_value
-
-    # Explicit GLOBAL_PROXY wins over WARP. warp=off disables only WARP, not configured proxies.
-    proxy = SELECTED_PROXY_CONTEXT.get()
-    if proxy and is_proxy_alive(proxy):
-        # ✅ FIX: Se bypass_warp=True e il proxy selezionato è WARP, saltalo.
-        # get_preferred_proxy_for_url (chiamato dagli estrattori) setta
-        # SELECTED_PROXY_CONTEXT a WARP, ma bypass_warp deve avere la priorità.
-        if bypass_warp and _WARP_PROXY_URL and proxy == _WARP_PROXY_URL:
-            logger.debug(
-                "Skipping WARP from SELECTED_PROXY_CONTEXT because bypass_warp=True"
-            )
-        else:
-            return proxy
-
-    # Try next alive proxy from the same source list (extractor, proxy_file, etc.)
-    proxy = _next_from_source(proxy)
-    if proxy:
-        # ✅ FIX: Se bypass_warp=True e il proxy è WARP, saltalo e continua
-        if bypass_warp and _WARP_PROXY_URL and proxy == _WARP_PROXY_URL:
-            logger.debug(
-                "Skipping WARP from _next_from_source because bypass_warp=True"
-            )
-        else:
+    PROXY_SOURCE_LIST.set(ordered)
+    for proxy in ordered:
+        if is_proxy_alive(proxy):
             SELECTED_PROXY_CONTEXT.set(proxy)
+            STRICT_PROXY_CONTEXT.set(getattr(ordered, "strict", False))
             return proxy
 
-    proxy = random.choice(global_proxies) if global_proxies else None
-    # ✅ FIX: Se bypass_warp=True e il proxy pescato da GLOBAL_PROXIES è WARP, ignoriamo
-    if bypass_warp and _WARP_PROXY_URL and proxy == _WARP_PROXY_URL:
-        proxy = None
-    if proxy:
-        SELECTED_PROXY_CONTEXT.set(proxy)
-        STRICT_PROXY_CONTEXT.set(False)
-
-    if proxy and is_proxy_alive(proxy):
-        return proxy
-
-    # Check if WARP should be used only when no explicit proxy is configured.
-    is_excluded = _is_warp_excluded(url)
-
-    if _ENABLE_WARP and not bypass_warp and not is_excluded:
-        warp_alive = is_proxy_alive(_WARP_PROXY_URL)
-        if warp_alive:
-            return _WARP_PROXY_URL
-        return None
-
-    proxy = SELECTED_PROXY_CONTEXT.get()
-    if proxy and is_proxy_alive(proxy):
-        return proxy
-
-    proxy = _next_from_source(proxy)
-    if proxy:
-        SELECTED_PROXY_CONTEXT.set(proxy)
-        return proxy
-
-    proxy = random.choice(global_proxies) if global_proxies else None
-    if proxy and is_proxy_alive(proxy):
-        return proxy
-
-    return None
+    # Keep the route non-direct even when health probing says every candidate
+    # is down. The actual request then returns the expected connection error.
+    fallback = ordered[0]
+    logger.warning("All proxy routes failed health check for %s; keeping %s", url, fallback)
+    SELECTED_PROXY_CONTEXT.set(fallback)
+    STRICT_PROXY_CONTEXT.set(getattr(ordered, "strict", False))
+    return fallback
 
 
 def get_connector_for_proxy(proxy_url: str, **kwargs):

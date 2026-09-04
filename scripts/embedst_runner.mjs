@@ -17,6 +17,17 @@ import vm from 'node:vm';
 const DEBUG = process.env.EMBEDST_DEBUG === '1' || process.argv.includes('--debug');
 function L(...a) { if (DEBUG) console.error('[embedst]', ...a); }
 
+let proxyDispatcher = null;
+if (process.env.EMBEDST_PROXY && /^https?:\/\//i.test(process.env.EMBEDST_PROXY)) {
+  try {
+    const { ProxyAgent } = await import('undici');
+    proxyDispatcher = new ProxyAgent(process.env.EMBEDST_PROXY);
+  } catch (error) {
+    L('HTTP proxy unavailable:', error.message);
+    throw error;
+  }
+}
+
 const EMBED = process.argv[2];
 if (!EMBED) { console.error('usage: embedst_runner.mjs <embed_url>'); process.exit(2); }
 const u = new URL(EMBED);
@@ -24,6 +35,9 @@ const ORIGIN = u.origin;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
 
 const realFetch = globalThis.fetch;
+const routedFetch = (url, opts = {}) => proxyDispatcher
+  ? realFetch(url, { ...opts, dispatcher: proxyDispatcher })
+  : realFetch(url, opts);
 let capturedStreamUrl = null;
 
 // ---------------------------------------------------------------------------
@@ -115,7 +129,7 @@ const fetchImpl = async (url, opts) => {
     finish();
   }
   const headers = Object.assign({ 'User-Agent': UA, 'Referer': EMBED, 'Origin': ORIGIN }, (opts && opts.headers) || {});
-  const resp = await realFetch(url, Object.assign({}, opts || {}, { headers }));
+  const resp = await routedFetch(url, Object.assign({}, opts || {}, { headers }));
   L('FETCH-RESP', resp.status, displayUrl);
   return resp;
 };
@@ -127,7 +141,7 @@ const XHR = function () {
     const abs = /^\//.test(this._uri) ? ORIGIN + this._uri : this._uri;
     const hdrs = Object.assign({ 'User-Agent': UA, 'Referer': EMBED, 'Origin': ORIGIN }, this._h);
     try {
-      const r = await realFetch(abs, { method: this._method || 'GET', headers: hdrs, body });
+      const r = await routedFetch(abs, { method: this._method || 'GET', headers: hdrs, body });
       const txt = await r.text();
       this.status = r.status; this.responseText = txt; this.response = txt; this.readyState = 4;
       if (this.onload) { try { this.onload.call(this, {}); } catch (e) {} }
@@ -230,7 +244,7 @@ process.on('unhandledRejection', (r) => { L('unhandled', r && r.message ? r.mess
 const modCache = {};
 async function fetchText(url) {
   if (modCache[url]) return modCache[url];
-  const r = await realFetch(url, { headers: { 'User-Agent': UA, 'Referer': EMBED } });
+  const r = await routedFetch(url, { headers: { 'User-Agent': UA, 'Referer': EMBED } });
   if (!r.ok) throw new Error('fetch ' + url + ' -> ' + r.status);
   const t = await r.text();
   modCache[url] = t;

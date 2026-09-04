@@ -5,6 +5,7 @@ import os
 import shutil
 from typing import Any
 
+from config import BYPASS_WARP_CONTEXT, get_preferred_proxy_for_url
 from extractors.base import BaseExtractor, ExtractorError
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,25 @@ class EmbedStExtractor(BaseExtractor):
         if not os.path.exists(_RUNNER):
             raise ExtractorError(f"EmbedSt: runner script not found at {_RUNNER}")
 
+        bypass_warp = bool(kwargs.get("bypass_warp") or self.bypass_warp_active)
+        self.bypass_warp_active = bypass_warp
+        proxy = await get_preferred_proxy_for_url(
+            url, "embedst", self.proxies, bypass_warp
+        )
+        if proxy is None and not (bypass_warp or BYPASS_WARP_CONTEXT.get()):
+            raise ExtractorError(
+                "EmbedSt: direct fallback disabled; no proxy route available"
+            )
+        if proxy and not str(proxy).lower().startswith(("http://", "https://")):
+            raise ExtractorError(
+                f"EmbedSt: selected route is not supported by the Node resolver ({proxy}); refusing direct fallback"
+            )
+
         env = dict(os.environ)
+        if proxy:
+            env["EMBEDST_PROXY"] = str(proxy)
+        else:
+            env.pop("EMBEDST_PROXY", None)
         if kwargs.get("background_refresh") or kwargs.get("force_refresh"):
             env["EMBEDST_DEBUG"] = "1"
 
@@ -160,9 +179,25 @@ class EmbedStExtractor(BaseExtractor):
         return self._curl_session
 
     async def _fetch_manifest(self, url: str, headers: dict) -> str | None:
+        proxy = await get_preferred_proxy_for_url(
+            url, "embedst", self.proxies, self.bypass_warp_active
+        )
+        if proxy is None and not (self.bypass_warp_active or BYPASS_WARP_CONTEXT.get()):
+            raise ExtractorError(
+                "EmbedSt: direct fallback disabled; no proxy route available"
+            )
+        request_kwargs = {}
+        if proxy:
+            request_kwargs["proxies"] = {"http": proxy, "https": proxy}
         try:
             s = await self._get_curl_session()
-            resp = await s.get(url, headers=headers, timeout=20, allow_redirects=True)
+            resp = await s.get(
+                url,
+                headers=headers,
+                timeout=20,
+                allow_redirects=True,
+                **request_kwargs,
+            )
             if resp.status_code == 200:
                 return resp.text
             logger.debug("EmbedSt manifest fetch curl_cffi status %s", resp.status_code)

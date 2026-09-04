@@ -1,7 +1,7 @@
 import time
 import aiohttp
 from urllib.parse import urljoin
-from config import STRICT_PROXY_CONTEXT, should_allow_direct_fallback
+from config import STRICT_PROXY_CONTEXT
 import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
@@ -328,23 +328,7 @@ class HLSProxyDashMixin:
                         if forced_proxy or STRICT_PROXY_CONTEXT.get():
                             logger.warning("🔐 Strict proxy mode: skipping direct fallback")
                             return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
-                        logger.warning("🔐 Trying direct connection as final fallback for AES key...")
-                        try:
-                            _key_session = await self._get_session(url=key_url)
-                            async with _key_session.get(key_url, headers=headers, ssl=not disable_ssl, allow_redirects=False, timeout=10) as direct_resp:
-                                if direct_resp.status in (200, 206):
-                                    key_data = await direct_resp.read()
-                                    return web.Response(
-                                        body=key_data,
-                                        content_type="application/octet-stream",
-                                        headers={
-                                            "Access-Control-Allow-Origin": "*",
-                                            "Access-Control-Allow-Headers": "*",
-                                            "Cache-Control": "no-cache, no-store, must-revalidate",
-                                        },
-                                    )
-                        except Exception as direct_e:
-                            logger.error(f"❌ Key fetch final direct fallback failed: {direct_e}")
+                        logger.warning("🔐 Key fetch failed; direct fallback disabled")
 
                         # --- LOGICA DI INVALIDAZIONE AUTOMATICA ---
                         url_param = request.query.get("original_channel_url")
@@ -414,23 +398,7 @@ class HLSProxyDashMixin:
                     logger.warning("🔐 Strict proxy mode: skipping direct fallback")
                     return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
                 
-                logger.warning("🔐 Trying direct connection as final fallback for AES key...")
-                try:
-                    direct_session = await self._get_session()
-                    async with direct_session.get(key_url, headers=headers, ssl=not disable_ssl, allow_redirects=False, timeout=10) as direct_resp:
-                        if direct_resp.status in (200, 206):
-                            key_data = await direct_resp.read()
-                            return web.Response(
-                                body=key_data,
-                                content_type="application/octet-stream",
-                                headers={
-                                    "Access-Control-Allow-Origin": "*",
-                                    "Access-Control-Allow-Headers": "*",
-                                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                                },
-                            )
-                except Exception as direct_e:
-                    logger.error(f"❌ Key fetch final direct fallback failed: {direct_e}")
+                logger.warning("🔐 Key fetch failed; direct fallback disabled")
                 raise e
 
         except Exception as e:

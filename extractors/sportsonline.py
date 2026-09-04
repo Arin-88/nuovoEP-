@@ -156,11 +156,18 @@ class SportsonlineExtractor:
 
     async def _get_session(self, url: str = None, force_direct: bool = False):
         if force_direct:
+            if not _cfg.BYPASS_WARP_CONTEXT.get():
+                raise aiohttp.ClientConnectionError(
+                    "Sportsonline: implicit direct fallback disabled"
+                )
             proxy = None
         else:
             proxy = await get_preferred_proxy_for_url(url, "sportsonline", self.proxies)
-            if not proxy and not url:
-                proxy = self._get_random_proxy()
+
+        if proxy is None and not _cfg.BYPASS_WARP_CONTEXT.get():
+            raise aiohttp.ClientConnectionError(
+                "Sportsonline: direct fallback disabled; no proxy route available"
+            )
 
         if (
             self.session is None
@@ -207,23 +214,11 @@ class SportsonlineExtractor:
             except (ssl.SSLError, ClientOSError) as e:
                 logger.warning(f"SSL/OS error attempt {attempt + 1} for {url}: {str(e)}")
                 if self._session_proxy:
-                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying direct...")
+                    logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying without direct fallback...")
                     if self.session and not self.session.closed:
                         await self.session.close()
                     self.session = None
                     self._session_proxy = None
-                    session = await self._get_session(url, force_direct=True)
-                    try:
-                        async with session.get(url, headers=final_headers, timeout=timeout) as response:
-                            response.raise_for_status()
-                            html = await self._handle_response_content(response)
-                            if not html:
-                                raise ExtractorError(f"Empty response for {url}")
-                            logger.info(f"Direct connection succeeded for {url} after SSL error")
-                            return html, str(response.url)
-                    except Exception as direct_err:
-                        logger.warning(f"Direct connection also failed for {url}: {str(direct_err)}")
-                        raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:

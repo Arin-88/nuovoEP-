@@ -60,17 +60,31 @@ class VidFastExtractor:
             raise ExtractorError(f"VidFast: runner script not found at {_RUNNER}")
 
         forced_proxy = kwargs.get("proxy")
-        if forced_proxy:
+        direct_requested = str(kwargs.get("direct", "")).lower() in {"1", "true", "yes", "on"}
+        bypass_warp = bool(kwargs.get("bypass_warp"))
+        if direct_requested:
+            proxy = None
+        elif forced_proxy:
             proxy = str(forced_proxy)
         else:
             proxy = await get_preferred_proxy_for_url(
-                url, self.extractor_name, self.proxies
+                url, self.extractor_name, self.proxies, bypass_warp
             )
+
+        if proxy is None and not (direct_requested or bypass_warp):
+            raise ExtractorError(
+                "VidFast: direct fallback disabled; no proxy route available"
+            )
+
         runner_proxy = (
             proxy
             if proxy and str(proxy).lower().startswith(("http://", "https://"))
             else None
         )
+        if proxy and runner_proxy is None:
+            raise ExtractorError(
+                f"VidFast: selected route is not supported by the Node resolver ({proxy}); refusing direct fallback"
+            )
         self.last_used_proxy = runner_proxy
 
         env = dict(os.environ)
@@ -135,8 +149,8 @@ class VidFastExtractor:
             "request_headers": headers,
             "mediaflow_endpoint": self.mediaflow_endpoint,
             "selected_proxy": self.last_used_proxy,
-            "force_direct": self.last_used_proxy is None,
-            "bypass_warp": bool(kwargs.get("bypass_warp")),
+            "force_direct": direct_requested,
+            "bypass_warp": bypass_warp,
         }
 
     async def close(self):

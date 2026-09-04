@@ -14,7 +14,6 @@ from config import (
     BYPASS_WARP_CONTEXT,
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
-    get_extractor_proxies,
     get_proxy_for_url,
 )
 
@@ -50,8 +49,6 @@ class RoutingOptions:
     extractor_name: str = ""
 
     def proxy_for(self, url: str) -> str | None:
-        if self.forced_proxy:
-            return self.forced_proxy
         _refresh_live_config()
         bypass_warp = self.warp_off
         bypass_proxies = self.proxy_off
@@ -63,24 +60,26 @@ class RoutingOptions:
             proxy_off_extractors = {
                 str(value).lower() for value in config_store.get("proxy_off_extractors", [])
             }
-            if extractor_key in warp_off_extractors or extractor_key == "embedst":
+            if extractor_key in warp_off_extractors:
                 bypass_warp = True
             if extractor_key in proxy_off_extractors:
                 bypass_proxies = True
+
+        # Explicit proxies command over WARP. proxy=off must disable even a
+        # forced proxy so the resolver can select WARP instead.
+        if self.forced_proxy and not bypass_proxies:
+            return self.forced_proxy
 
         bypass_warp_token = BYPASS_WARP_CONTEXT.set(bypass_warp)
         bypass_proxy_token = BYPASS_PROXIES_CONTEXT.set(bypass_proxies)
         selected_token = SELECTED_PROXY_CONTEXT.set(None)
         strict_token = STRICT_PROXY_CONTEXT.set(False)
         try:
-            if self.extractor_name and not bypass_proxies:
-                extractor_proxies = get_extractor_proxies(self.extractor_name)
-                if extractor_proxies:
-                    return extractor_proxies[0]
             return get_proxy_for_url(
                 url,
                 bypass_warp=bypass_warp,
                 bypass_proxies=bypass_proxies,
+                extractor_name=self.extractor_name,
             )
         finally:
             BYPASS_WARP_CONTEXT.reset(bypass_warp_token)

@@ -7,6 +7,7 @@ from config import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     BYPASS_PROXIES_CONTEXT,
+    BYPASS_WARP_CONTEXT,
     get_proxy_for_url,
     get_extractor_proxies,
 )
@@ -38,7 +39,7 @@ def _resolve_sportsonline_proxy(url: str, bypass_warp: bool = False) -> str | No
 
 
 def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | None = None) -> list[str]:
-    """Build proxy list; explicit/extractor proxies are strict and exclude globals."""
+    """Build the extractor's fallback list without enabling direct implicitly."""
     proxies = []
     selected_proxy = SELECTED_PROXY_CONTEXT.get()
     if selected_proxy and STRICT_PROXY_CONTEXT.get():
@@ -46,12 +47,30 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
     if BYPASS_PROXIES_CONTEXT.get():
         return []
     extractor_proxies = get_extractor_proxies(extractor_name or "")
-    if extractor_proxies:
-        return extractor_proxies
     _GLOBAL_PROXIES = _config.GLOBAL_PROXIES
-    for proxy in ([selected_proxy] if selected_proxy else []) + ([primary_proxy] if primary_proxy else []) + list(_GLOBAL_PROXIES):
+
+    # The URL-aware resolver applies the exact route priority on every request.
+    # Keep this cached list complete so extractor implementations that retain
+    # their own session can still fail over to global/WARP.
+    candidates = (
+        ([selected_proxy] if selected_proxy else [])
+        + list(extractor_proxies)
+        + ([primary_proxy] if primary_proxy else [])
+        + list(_GLOBAL_PROXIES)
+    )
+    for proxy in candidates:
+        if proxy == _config.WARP_PROXY_URL:
+            continue
         if proxy and proxy not in proxies:
             proxies.append(proxy)
+
+    if (
+        _config.ENABLE_WARP
+        and not BYPASS_WARP_CONTEXT.get()
+        and not _config._is_warp_excluded(extractor_name or "")
+        and _config.WARP_PROXY_URL not in proxies
+    ):
+        proxies.append(_config.WARP_PROXY_URL)
     return proxies
 
 
@@ -109,7 +128,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             elif host in {"mixdrop", "m1xdrop"}:
                 if key not in self.extractors:
                     self.extractors[key] = MixdropExtractor(
-                        request_headers, proxies=proxy_list
+                        request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                     )
                 return self.extractors[key]
             elif host == "voe":
@@ -426,7 +445,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             proxy_list = _build_proxy_list(proxy, "mixdrop")
             if key not in self.extractors:
                 self.extractors[key] = MixdropExtractor(
-                    request_headers, proxies=proxy_list
+                    request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                 )
             return self.extractors[key]
         elif any(

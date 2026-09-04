@@ -7,10 +7,10 @@ import re
 import socket
 import time
 import uuid
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientConnectionError, ClientSession, ClientTimeout, TCPConnector
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
-from config import get_connector_for_proxy, BYPASS_PROXIES_CONTEXT
+from config import BYPASS_PROXIES_CONTEXT, BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -68,8 +68,18 @@ class VavooExtractor:
             if self.session is not None and not self.session.closed:
                 return self.session
 
-            if not bypass_proxies and self._proxy is None and self.proxies:
-                self._proxy = random.choice(self.proxies)
+            if self._proxy is None:
+                self._proxy = await get_preferred_proxy_for_url(
+                    self._resolve_url,
+                    "vavoo",
+                    self.proxies,
+                    BYPASS_WARP_CONTEXT.get(),
+                )
+
+            if self._proxy is None and not BYPASS_WARP_CONTEXT.get():
+                raise ClientConnectionError(
+                    "Vavoo: direct fallback disabled; no proxy route available"
+                )
 
             timeout = ClientTimeout(total=60, connect=30, sock_read=30)
 
