@@ -9,12 +9,9 @@ re-fetches the embed page on each extract() call to get fresh tokens.
 import base64
 import logging
 import re
-import time
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
-
-from config import get_connector_for_proxy, get_ordered_proxies_for_url, should_allow_direct_fallback
+from config import get_ordered_proxies_for_url, should_allow_direct_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +105,15 @@ class VidXgoExtractor:
 
     # ------------------------------------------------------------------ proxies
 
+    @staticmethod
+    def _normalize_proxy_url(proxy_value: str) -> str:
+        proxy_value = unquote(proxy_value).strip()
+        if proxy_value.startswith("socks5://"):
+            return proxy_value.replace("socks5://", "socks5h://", 1)
+        if proxy_value.startswith("socks4a://"):
+            return proxy_value.replace("socks4a://", "socks4://", 1)
+        return proxy_value
+
     def _get_proxies_for_url(self, url: str) -> list[str]:
         return get_ordered_proxies_for_url(url, self.extractor_name, self.proxies)
 
@@ -123,20 +129,41 @@ class VidXgoExtractor:
             url,
             ", ".join(proxy or "direct" for proxy in paths) or "none",
         )
+        try:
+            from curl_cffi.requests import AsyncSession as CurlAsyncSession
+        except ImportError as exc:
+            raise ExtractorError("VidXgo: curl_cffi is required") from exc
+
+        curl_headers = {
+            key: value for key, value in headers.items()
+            if key.lower() != "user-agent"
+        }
         last_error = None
         for proxy in paths:
-            timeout = ClientTimeout(total=25, connect=10, sock_read=20)
-            connector = get_connector_for_proxy(proxy) if proxy else TCPConnector(ssl=False)
+            proxy_url = self._normalize_proxy_url(proxy) if proxy else None
+            request_kwargs = {
+                "proxies": {"http": proxy_url, "https": proxy_url}
+            } if proxy_url else {}
             try:
-                async with ClientSession(timeout=timeout, connector=connector) as session:
-                    async with session.get(url, headers=headers, ssl=False) as resp:
-                        resp.raise_for_status()
-                        text = await resp.text()
-                        self.selected_proxy = proxy
-                        return text
+                logger.info("vidxgo curl fetch via %s for %s", proxy_url or "direct", url)
+                async with CurlAsyncSession(impersonate="chrome124") as session:
+                    resp = await session.get(
+                        url,
+                        headers=curl_headers,
+                        timeout=25,
+                        verify=False,
+                        allow_redirects=True,
+                        **request_kwargs,
+                    )
+                if not 200 <= resp.status_code < 300:
+                    raise ExtractorError(
+                        f"curl_cffi HTTP {resp.status_code} via {proxy_url or 'direct'}"
+                    )
+                self.selected_proxy = proxy_url
+                return resp.text
             except Exception as e:
                 last_error = e
-                logger.debug(f"vidxgo fetch failed via {proxy or 'direct'}: {e}")
+                logger.debug(f"vidxgo curl fetch failed via {proxy_url or 'direct'}: {e}")
         raise ExtractorError(f"VidXgo: fetch failed for {url}: {last_error}")
 
     # ------------------------------------------------------------------ decode
