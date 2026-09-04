@@ -14,6 +14,7 @@ import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from config import WARP_PROXY_URL, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, STRICT_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback, mark_proxy_dead, DEAD_PROXIES, _proxy_lock, ALL_PROXY_ERRORS
 import config as _cfg
+from services.flaresolverr import FlareSolverrSolution, shutdown_flare_solver, solve_cloudflare
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,25 @@ _vixsrc_config_loaded_at = 0.0
 
 class ExtractorError(Exception):
     """Eccezione personalizzata per errori di estrazione."""
+
+
+class _CurlResponse:
+    """Small response adapter shared by curl_cffi and FlareSolverr results."""
+
+    def __init__(self, text_content: str, status: int, response_url: str, headers: dict | None = None):
+        self._text = text_content
+        self.status = status
+        self.status_code = status
+        self.text = text_content
+        self.url = response_url
+        self.headers = headers or {}
+
+    async def text_async(self):
+        return self._text
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise ExtractorError(f"HTTP error {self.status} for {self.url}")
 
 
 class VixSrcExtractor:
@@ -43,6 +63,8 @@ class VixSrcExtractor:
         self.extractor_name = "vixsrc"
         self.last_used_proxy = None
         self.last_used_direct = False
+        self._solver_cookie_header = self._header_value(request_headers, "Cookie")
+        self._solver_user_agent = ""
         logger.info(
             "VixSrc proxy config: transport_routes=%d dedicated_proxies=%d fallback_proxies=%d",
             len(_cfg.TRANSPORT_ROUTES),
@@ -152,27 +174,85 @@ class VixSrcExtractor:
     def _fresh_headers(self, **extra_headers) -> dict:
         headers = self._default_headers()
         headers.update(extra_headers)
-        return headers
+        return self._apply_solver_headers(headers)
+
+    @staticmethod
+    def _header_value(headers: dict | None, name: str) -> str:
+        if not headers:
+            return ""
+        wanted = name.lower()
+        for key, value in headers.items():
+            if str(key).lower() == wanted:
+                return str(value or "")
+        return ""
+
+    @staticmethod
+    def _merge_cookie_headers(*cookie_headers: str | None) -> str:
+        merged = {}
+        for header in cookie_headers:
+            for item in (header or "").split(";"):
+                name, separator, value = item.strip().partition("=")
+                if name and separator:
+                    merged[name.strip()] = value.strip()
+        return "; ".join(f"{name}={value}" for name, value in merged.items())
+
+    def _apply_solver_headers(self, headers: dict | None) -> dict:
+        result = dict(headers or {})
+        if self._solver_cookie_header:
+            existing_cookie = self._header_value(result, "Cookie")
+            for key in list(result):
+                if str(key).lower() == "cookie":
+                    result.pop(key, None)
+            result["Cookie"] = self._merge_cookie_headers(existing_cookie, self._solver_cookie_header)
+        if self._solver_user_agent:
+            for key in list(result):
+                if str(key).lower() == "user-agent":
+                    result.pop(key, None)
+            result["User-Agent"] = self._solver_user_agent
+        return result
+
+    def _remember_solver_solution(self, solution: FlareSolverrSolution, proxy: str | None) -> None:
+        if solution.cookie_header:
+            self._solver_cookie_header = self._merge_cookie_headers(
+                self._solver_cookie_header,
+                solution.cookie_header,
+            )
+        if solution.user_agent:
+            self._solver_user_agent = solution.user_agent
+        self.last_used_proxy = self._normalize_proxy_url(proxy) if proxy else None
+        self.last_used_direct = proxy is None
+        logger.info(
+            "VixSrc FlareSolverr solved challenge via %s and returned %d cookies",
+            self.last_used_proxy or "direct",
+            len(solution.cookies),
+        )
+
+    async def _solve_cloudflare(self, url: str, headers: dict | None = None, forced_proxy: str | None = None):
+        proxy = forced_proxy or self.session_proxy
+        if proxy:
+            proxy = self._normalize_proxy_url(proxy)
+        allow_direct = bool(self.bypass_warp_active or _cfg.BYPASS_WARP_CONTEXT.get())
+        solution = await solve_cloudflare(
+            url,
+            proxy_url=get_solver_proxy_url(proxy),
+            cookie_header=self._header_value(headers, "Cookie"),
+            allow_direct=allow_direct,
+        )
+        self._remember_solver_solution(solution, proxy)
+        return solution
+
+    async def _flaresolverr_response(
+        self,
+        url: str,
+        headers: dict | None = None,
+        forced_proxy: str | None = None,
+    ):
+        solution = await self._solve_cloudflare(url, headers=headers, forced_proxy=forced_proxy)
+        return _CurlResponse(solution.response, solution.status, solution.url)
 
     async def _make_curl_request(self, url: str, headers: dict = None, forced_proxy: str | None = None):
         """Fetch Cloudflare-protected embeds with curl_cffi and proxy rotation."""
         from curl_cffi.requests import AsyncSession as CurlAsyncSession
-
-        class MockResponse:
-            def __init__(self, text_content, status, response_url):
-                self._text = text_content
-                self.status = status
-                self.status_code = status
-                self.text = text_content
-                self.url = response_url
-                self.headers = {}
-
-            async def text_async(self):
-                return self._text
-
-            def raise_for_status(self):
-                if self.status >= 400:
-                    raise ExtractorError(f"curl_cffi HTTP error {self.status} for {self.url}")
 
         proxies_to_try = await self._proxy_candidates(url, forced_proxy)
         if not proxies_to_try and forced_proxy:
@@ -203,8 +283,9 @@ class VixSrcExtractor:
         final_headers = self._fresh_headers(**(headers or {}))
 
         # Remove User-Agent to avoid TLS fingerprint mismatch with impersonation
-        final_headers.pop("User-Agent", None)
-        final_headers.pop("user-agent", None)
+        if not self._solver_user_agent:
+            final_headers.pop("User-Agent", None)
+            final_headers.pop("user-agent", None)
 
         timeout = _cfg.PROXY_TEST_TIMEOUT
         async def _try_one(proxy_value: str | None, imp: str):
@@ -223,15 +304,20 @@ class VixSrcExtractor:
                     )
                     content = resp.text
                 if 200 <= resp.status_code < 300:
-                    return True, proxy, MockResponse(content, resp.status_code, url), None, resp.status_code
-                if proxy_value and resp.status_code not in (403, 404):
+                    is_challenge = self._is_cloudflare_challenge(content, resp.status_code)
+                    if not is_challenge:
+                        return True, proxy, _CurlResponse(content, resp.status_code, url), None, resp.status_code, False
+                else:
+                    is_challenge = self._is_cloudflare_challenge(content, resp.status_code)
+                if proxy_value and resp.status_code not in (403, 404, 503) and not is_challenge:
                     mark_proxy_dead(proxy_value)
-                return False, proxy, None, None, resp.status_code
+                return False, proxy, None, None, resp.status_code, is_challenge
             except Exception as exc:
                 if proxy_value:
                     mark_proxy_dead(proxy_value)
-                return False, proxy, None, exc, None
+                return False, proxy, None, exc, None, False
 
+        challenge_proxy = None
         for imp in impersonations:
             if asyncio.current_task().cancelled():
                 logger.info("Extraction cancelled, skipping remaining impersonations for %s", url)
@@ -243,16 +329,29 @@ class VixSrcExtractor:
             # Preserve resolver priority. A parallel race can let a lower
             # priority global proxy win before the configured route/file proxy.
             for proxy_value in proxies_to_try:
-                ok, proxy, response, exc, status = await _try_one(proxy_value, imp)
+                ok, proxy, response, exc, status, is_challenge = await _try_one(proxy_value, imp)
                 if ok:
                     self.last_used_proxy = proxy
                     self.last_used_direct = proxy is None
                     logger.info("curl_cffi success via %s for %s (imp=%s)", proxy or "direct", url, imp)
                     return response
+                if is_challenge and challenge_proxy is None:
+                    challenge_proxy = proxy_value
                 if isinstance(status, int):
                     last_status = status
                 if exc:
                     last_error = exc
+
+        if challenge_proxy is not None or last_status in (403, 503):
+            try:
+                return await self._flaresolverr_response(
+                    url,
+                    headers=final_headers,
+                    forced_proxy=forced_proxy or challenge_proxy or preferred_proxy,
+                )
+            except Exception as solver_exc:
+                logger.warning("FlareSolverr challenge solve failed for %s: %s", url, solver_exc)
+                last_error = solver_exc
 
         if last_error:
             raise ExtractorError(f"curl_cffi request failed for {url}: {last_error}")
@@ -372,18 +471,23 @@ class VixSrcExtractor:
                     status = response.status
 
                     if self._is_cloudflare_challenge(content, status):
-                        logger.info("Cloudflare challenge screen or status %s detected for %s. Triggering curl_cffi direct bypass...", status, url)
+                        logger.info(
+                            "Cloudflare challenge screen or status %s detected for %s. "
+                            "Starting FlareSolverr on-demand...",
+                            status,
+                            url,
+                        )
                         try:
-                            headers_cf = final_headers or self._default_headers()
-                            return await self._make_curl_request(url, headers=headers_cf, forced_proxy=forced_proxy)
-                        except Exception as cffi_exc:
-                            logger.warning("curl_cffi fallback failed for %s: %s", url, cffi_exc)
-                            raise aiohttp.ClientResponseError(
-                                request_info=response.request_info,
-                                history=response.history,
-                                status=status,
-                                message=f"Cloudflare challenge bypass failed: {cffi_exc}"
+                            return await self._flaresolverr_response(
+                                url,
+                                headers=final_headers or self._default_headers(),
+                                forced_proxy=forced_proxy or self.session_proxy,
                             )
+                        except Exception as solver_exc:
+                            logger.warning("FlareSolverr failed for %s: %s", url, solver_exc)
+                            raise ExtractorError(
+                                f"Cloudflare challenge solve failed for {url}: {solver_exc}"
+                            ) from solver_exc
 
                     response.raise_for_status()
 
@@ -455,11 +559,14 @@ class VixSrcExtractor:
 
                 if e.status == 403:
                     try:
-                        logger.info("aiohttp 403 detected, trying curl_cffi for %s", url)
-                        headers_403 = final_headers or self._default_headers()
-                        return await self._make_curl_request(url, headers=headers_403, forced_proxy=forced_proxy)
-                    except Exception as cffi_exc:
-                        logger.warning("curl_cffi fallback failed for %s: %s", url, cffi_exc)
+                        logger.info("aiohttp 403 detected, starting FlareSolverr for %s", url)
+                        return await self._flaresolverr_response(
+                            url,
+                            headers=final_headers or self._default_headers(),
+                            forced_proxy=forced_proxy or self.session_proxy,
+                        )
+                    except Exception as solver_exc:
+                        logger.warning("FlareSolverr failed for %s: %s", url, solver_exc)
 
                 if attempt == retries - 1:
                     raise ExtractorError(f"Final HTTP error {e.status} for {url}: {str(e)}")
@@ -739,9 +846,13 @@ class VixSrcExtractor:
                 # Use cookies and UA from the request (e.g. cf_clearance forwarded by redirect)
                 req_h = kwargs.get("request_headers") or {}
                 if req_h.get("Cookie"):
-                    stream_headers["Cookie"] = req_h["Cookie"]
-                if req_h.get("User-Agent"):
+                    stream_headers["Cookie"] = self._merge_cookie_headers(
+                        req_h["Cookie"],
+                        self._solver_cookie_header,
+                    )
+                if req_h.get("User-Agent") and not self._solver_user_agent:
                     stream_headers["User-Agent"] = req_h["User-Agent"]
+                stream_headers = self._apply_solver_headers(stream_headers)
 
                 clean_dest = self._replace_vixsrc_domain(url)
                 return {
@@ -899,3 +1010,4 @@ class VixSrcExtractor:
                 pass
             self.session = None
             self.session_proxy = None
+        await shutdown_flare_solver()

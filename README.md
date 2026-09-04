@@ -119,6 +119,13 @@ sysctl.
 
 You can enable and configure WARP, customize the excluded domains list, and enter your license key directly from the **Admin Panel**.
 
+### 🧩 VixSrc FlareSolverr
+The Docker image also contains FlareSolverr, Chromium, and Xvfb. FlareSolverr is
+not started at EasyProxy startup: VixSrc launches it only after detecting a
+Cloudflare challenge, passes the currently selected proxy/WARP route, imports
+the returned cookies and User-Agent, then terminates the process immediately.
+When WARP is active, a missing solver route fails closed instead of using direct.
+
 ---
 
 ## 📖 API Usage

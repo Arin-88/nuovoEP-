@@ -4,6 +4,7 @@ services:
     image: ghcr.io/realbestia1/easyproxy:latest
     container_name: easyproxy
     restart: unless-stopped
+    shm_size: "2gb"
     ports:
       - "7860:7860"
     environment:
