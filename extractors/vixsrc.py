@@ -399,7 +399,7 @@ class VixSrcExtractor:
         proxy = forced_proxy or self.session_proxy
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
-        allow_direct = bool(self.bypass_warp_active or _cfg.BYPASS_WARP_CONTEXT.get())
+        allow_direct = _cfg.is_direct_connection_allowed(self.bypass_warp_active)
         solution = await solve_cloudflare(
             url,
             proxy_url=get_solver_proxy_url(proxy),
@@ -426,7 +426,7 @@ class VixSrcExtractor:
         proxies_to_try = await self._proxy_candidates(url, forced_proxy)
         if not proxies_to_try and forced_proxy:
             raise ExtractorError("No alive VixSrc forced proxy available")
-        if not proxies_to_try and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+        if not proxies_to_try and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise ExtractorError("No alive VixSrc proxy route available; direct fallback disabled")
         preferred_proxy = proxies_to_try[0] if proxies_to_try else None
         logger.info(
@@ -604,7 +604,7 @@ class VixSrcExtractor:
             proxy = self._get_random_proxy()
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
-        if proxy is None and not self.bypass_warp_active and not _cfg.BYPASS_WARP_CONTEXT.get():
+        if proxy is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
             raise aiohttp.ClientConnectionError(
                 "VixSrc: direct fallback disabled; no proxy route available"
             )

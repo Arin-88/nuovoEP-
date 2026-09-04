@@ -7,7 +7,8 @@ import time
 from urllib.parse import urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
-from config import BYPASS_WARP_CONTEXT, get_preferred_proxy_for_url
+from config import get_preferred_proxy_for_url
+import config as _cfg
 from utils.cookie_cache import CookieCache
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class DoodStreamExtractor:
         bypass_warp: bool = False,
     ) -> dict | None:
         normalized_proxy = self._normalize_proxy_url(proxy_url) if proxy_url else None
-        if normalized_proxy is None and not (bypass_warp or BYPASS_WARP_CONTEXT.get()):
+        if normalized_proxy is None and not _cfg.is_direct_connection_allowed(bypass_warp):
             raise ExtractorError(
                 "DoodStream: direct fallback disabled; no proxy route available"
             )
