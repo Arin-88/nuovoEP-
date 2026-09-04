@@ -599,6 +599,11 @@ class VixSrcExtractor:
             )
         )
 
+    @staticmethod
+    def _is_expired_embed_response(html: str) -> bool:
+        low_html = (html or "").lower()
+        return "410 gone" in low_html or "an error occurred: gone" in low_html
+
     def _is_cloudflare_challenge(self, html: str, status: int) -> bool:
         """Distinguish a solvable challenge from a terminal block page."""
         if self._is_access_blocked_page(html):
@@ -858,6 +863,7 @@ class VixSrcExtractor:
             parsed_url = urlparse(url)
             response = None
             resolved_streamingcommunity = False
+            iframe_version = None
 
             if "/watch/" in parsed_url.path and "streamingcommunity" in parsed_url.netloc.lower():
                 url = await self._resolve_streamingcommunity_embed_url(url, forced_proxy=forced_proxy)
@@ -912,6 +918,7 @@ class VixSrcExtractor:
             elif "iframe" in url:
                 site_url = url.split("/iframe")[0]
                 version = await self.version(site_url, forced_proxy=None)
+                iframe_version = version
                 response = await self._make_robust_request(
                     url,
                     headers=self._fresh_headers(
@@ -1015,7 +1022,40 @@ class VixSrcExtractor:
 
             final_url = await _extract_from_html(response.text)
 
+            # StreamingCommunity can return an embed token with only a few
+            # seconds left. If FlareSolverr solved the challenge after that
+            # token expired, refresh the parent iframe once for a new token.
+            # This is not a solver retry: a failed challenge remains terminal.
+            if not final_url and "/iframe/" in parsed_url.path and self._is_expired_embed_response(response.text):
+                refresh_separator = "&" if "?" in url else "?"
+                refresh_url = f"{url}{refresh_separator}_ep_refresh={int(time.time())}"
+                logger.info("Expired VixSrc embed token detected; refreshing parent iframe once")
+                refresh_response = await self._make_robust_request(
+                    refresh_url,
+                    headers=self._fresh_headers(
+                        **({"x-inertia": "true", "x-inertia-version": iframe_version} if iframe_version else {})
+                    ),
+                    forced_proxy=None,
+                )
+                refreshed_iframe = await self._parse_html_simple(refresh_response.text, "iframe")
+                if refreshed_iframe and refreshed_iframe.get("src"):
+                    refreshed_embed_url = self._replace_vixsrc_domain(
+                        refreshed_iframe["src"].replace("&amp;", "&")
+                    )
+                    refreshed_response = await self._make_robust_request(
+                        refreshed_embed_url,
+                        headers=self._fresh_headers(
+                            **({"x-inertia": "true", "x-inertia-version": iframe_version} if iframe_version else {})
+                        ),
+                        forced_proxy=None,
+                    )
+                    final_url = await _extract_from_html(refreshed_response.text)
+
             if not final_url:
+                if self._is_expired_embed_response(response.text):
+                    raise ExtractorError(
+                        "VixSrc embed token expired (410 Gone); retry the original source URL"
+                    )
                 raise ExtractorError("No playlist data found in response")
 
             clean_destination = self._replace_vixsrc_domain(final_url)
