@@ -17,8 +17,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     ffmpeg \
     fonts-dejavu \
+    chromium \
+    chromium-common \
+    chromium-driver \
+    xvfb \
+    xauth \
+    dumb-init \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# FlareSolverr is part of this image, but EasyProxy starts it only on-demand
+# when VixSrc returns a Cloudflare challenge.
+ARG FLARESOLVERR_VERSION=3.5.0
+RUN set -eux; \
+    git clone --depth 1 --branch "v${FLARESOLVERR_VERSION}" \
+        https://github.com/FlareSolverr/FlareSolverr.git /opt/flaresolverr; \
+    pip install --no-cache-dir -r /opt/flaresolverr/requirements.txt; \
+    rm -rf /opt/flaresolverr/.git
 
 # WARP config generator and stable userspace SOCKS5 relay.
 ARG WGCF_VERSION=2.2.29
@@ -63,9 +78,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # 3. Environment Settings
 ENV PYTHONPATH=/app
+ENV FLARESOLVERR_DIR=/opt/flaresolverr
+ENV FLARESOLVERR_LOG_LEVEL=error
 
 # Copia esplicita
 COPY . .
+
+# FlareSolverr uses this Docker marker to avoid downloading an
+# undetected_chromedriver binary for the wrong CPU architecture. Debian's
+# chromedriver comes from the same package set as Chromium above.
+RUN ln -sf "$(command -v chromedriver)" /app/chromedriver
 
 RUN chmod +x entrypoint.sh scripts/warp_userspace_ctl.sh
 
