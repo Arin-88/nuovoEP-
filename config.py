@@ -35,7 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.14"
+APP_VERSION = "2.11.15"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
