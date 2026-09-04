@@ -101,6 +101,7 @@ class HLSProxyExtractorHandlerMixin:
                         "vavoo",
                         "vixsrc",
                         "vixcloud (alias of vixsrc)",
+                        "ads",
                         "sportsonline",
                         "mixdrop",
                         "voe",

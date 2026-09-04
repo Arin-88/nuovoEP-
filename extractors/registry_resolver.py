@@ -118,6 +118,17 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                         request_headers, proxies=proxy_list, bypass_warp=bypass_warp
                     )
                 return self.extractors[key]
+            elif host == "ads":
+                key = _cache_key("ads", bypass_warp)
+                if ADSExtractor is None:
+                    raise RuntimeError("ADSExtractor module not available")
+                proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
+                proxy_list = _build_proxy_list(proxy, "ads")
+                if key not in self.extractors:
+                    self.extractors[key] = ADSExtractor(
+                        request_headers, proxies=proxy_list
+                    )
+                return self.extractors[key]
             elif _is_sportsonline_candidate(host):
                 key = _cache_key("sportsonline", bypass_warp)
                 if key not in self.extractors:
@@ -331,6 +342,22 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
                 return self.extractors[key]
 
         # 2. Auto-detection basata sull'URL
+        parsed_url = urllib.parse.urlparse(url)
+        if (
+            parsed_url.hostname in {"altadefinizionestreaming.tv", "www.altadefinizionestreaming.tv"}
+            and parsed_url.path.startswith("/api/player-sources/")
+        ):
+            key = _cache_key("ads", bypass_warp)
+            if ADSExtractor is None:
+                raise RuntimeError("ADSExtractor module not available")
+            proxy = get_proxy_for_url(url, bypass_warp=bypass_warp)
+            proxy_list = _build_proxy_list(proxy, "ads")
+            if key not in self.extractors:
+                self.extractors[key] = ADSExtractor(
+                    request_headers, proxies=proxy_list
+                )
+            return self.extractors[key]
+
         # ✅ NUOVO: Salta estrattori specifici se l'URL sembra già un link diretto a un media
         # (evita di provare a estrarre un .mp4 come se fosse una pagina HTML)
         path_lower = url.split('?')[0].lower()
