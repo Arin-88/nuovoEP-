@@ -48,6 +48,7 @@ VidFastExtractor = None
 MediasetExtractor = None
 WittyTVExtractor = None
 RaiPlayExtractor = None
+ADSExtractor = None
 
 
 # Importazione condizionale degli estrattori
@@ -260,6 +261,13 @@ except Exception as e:
     logger.warning("⚠️ RaiPlayExtractor failed to load: %s", e)
     RaiPlayExtractor = None
 
+try:
+    from extractors.ads import ADSExtractor
+    logger.info("✅ ADSExtractor module loaded.")
+except Exception as e:
+    logger.warning("⚠️ ADSExtractor failed to load: %s", e)
+    ADSExtractor = None
+
 
 __all__ = [
     "VavooExtractor",
@@ -296,4 +304,5 @@ __all__ = [
     "MediasetExtractor",
     "WittyTVExtractor",
     "RaiPlayExtractor",
+    "ADSExtractor",
 ]
