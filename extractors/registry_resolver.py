@@ -7,6 +7,7 @@ from config import (
     SELECTED_PROXY_CONTEXT,
     STRICT_PROXY_CONTEXT,
     BYPASS_PROXIES_CONTEXT,
+    BYPASS_WARP_CONTEXT,
     get_proxy_for_url,
     get_extractor_proxies,
 )
