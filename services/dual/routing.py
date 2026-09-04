@@ -49,8 +49,6 @@ class RoutingOptions:
     extractor_name: str = ""
 
     def proxy_for(self, url: str) -> str | None:
-        if self.forced_proxy:
-            return self.forced_proxy
         _refresh_live_config()
         bypass_warp = self.warp_off
         bypass_proxies = self.proxy_off
@@ -66,6 +64,11 @@ class RoutingOptions:
                 bypass_warp = True
             if extractor_key in proxy_off_extractors:
                 bypass_proxies = True
+
+        # Explicit proxies command over WARP. proxy=off must disable even a
+        # forced proxy so the resolver can select WARP instead.
+        if self.forced_proxy and not bypass_proxies:
+            return self.forced_proxy
 
         bypass_warp_token = BYPASS_WARP_CONTEXT.set(bypass_warp)
         bypass_proxy_token = BYPASS_PROXIES_CONTEXT.set(bypass_proxies)
