@@ -1,3 +1,4 @@
+import re
 from urllib.parse import urlparse
 
 from extractors.base import BaseExtractor, ExtractorError
@@ -26,9 +27,16 @@ class ADSExtractor(BaseExtractor):
         if (
             parsed.scheme not in {"http", "https"}
             or parsed.hostname not in {"altadefinizionestreaming.tv", "www.altadefinizionestreaming.tv"}
-            or not parsed.path.startswith("/api/player-sources/")
         ):
-            raise ExtractorError("ADS: invalid player-sources URL")
+            raise ExtractorError("ADS: invalid URL")
+
+        if parsed.path.startswith("/api/player-sources/"):
+            sources_url = url
+        else:
+            film_match = re.fullmatch(r"/film/.+-(\d+)/?", parsed.path)
+            if not film_match:
+                raise ExtractorError("ADS: unsupported direct URL")
+            sources_url = f"{ADS_ORIGIN}/api/player-sources/movie/{film_match.group(1)}"
 
         cookie = self._cookie_from_kwargs(kwargs)
         if not cookie:
@@ -40,7 +48,7 @@ class ADSExtractor(BaseExtractor):
             "Accept": "application/json,text/plain,*/*",
             "Cookie": cookie,
         }
-        response = await self._make_request(url, headers=api_headers)
+        response = await self._make_request(sources_url, headers=api_headers)
         payload = response.json
         sources = payload.get("sources") if isinstance(payload, dict) else None
         if not isinstance(sources, list):

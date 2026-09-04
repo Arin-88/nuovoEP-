@@ -345,7 +345,10 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
         parsed_url = urllib.parse.urlparse(url)
         if (
             parsed_url.hostname in {"altadefinizionestreaming.tv", "www.altadefinizionestreaming.tv"}
-            and parsed_url.path.startswith("/api/player-sources/")
+            and (
+                parsed_url.path.startswith("/api/player-sources/")
+                or re.fullmatch(r"/film/.+-\d+/?", parsed_url.path)
+            )
         ):
             key = _cache_key("ads", bypass_warp)
             if ADSExtractor is None:
