@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import threading
 import time
 from typing import Any, Dict
@@ -12,6 +13,7 @@ from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urljoin, urlpa
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from config_store import DEFAULT_RECORDINGS_DIR
 from config import WARP_PROXY_URL, get_connector_for_proxy, SELECTED_PROXY_CONTEXT, STRICT_PROXY_CONTEXT, get_solver_proxy_url, get_extractor_proxies, get_ordered_proxies_for_url, should_allow_direct_fallback, mark_proxy_dead, DEAD_PROXIES, _proxy_lock, ALL_PROXY_ERRORS
 import config as _cfg
 from services.flaresolverr import FlareSolverrSolution, shutdown_flare_solver, solve_cloudflare
@@ -21,6 +23,16 @@ logger = logging.getLogger(__name__)
 VIXSRC_CONFIG_URL = "https://raw.githubusercontent.com/realbestia1/domains/refs/heads/main/domains.json"
 _vixsrc_domain = None
 _vixsrc_config_loaded_at = 0.0
+_VIXSRC_DATA_DIR = os.path.dirname(DEFAULT_RECORDINGS_DIR)
+_VIXSRC_COOKIE_FILE = os.getenv("VIXSRC_COOKIE_FILE") or os.path.join(
+    _VIXSRC_DATA_DIR, "cookies", "vixsrc.json"
+)
+_VIXSRC_LEGACY_COOKIE_FILE = os.path.join(_VIXSRC_DATA_DIR, "vixsrc_cookies.json")
+try:
+    _VIXSRC_COOKIE_TTL = max(300, int(os.getenv("VIXSRC_COOKIE_TTL", "7200")))
+except (TypeError, ValueError):
+    _VIXSRC_COOKIE_TTL = 7200
+_VIXSRC_COOKIE_LOCK = threading.RLock()
 
 
 class ExtractorError(Exception):
@@ -67,7 +79,8 @@ class VixSrcExtractor:
         self.extractor_name = "vixsrc"
         self.last_used_proxy = None
         self.last_used_direct = False
-        self._solver_cookie_header = self._header_value(request_headers, "Cookie")
+        self._initial_cookie_header = self._header_value(request_headers, "Cookie")
+        self._solver_cookie_header = self._initial_cookie_header
         self._solver_user_agent = ""
         logger.info(
             "VixSrc proxy config: transport_routes=%d dedicated_proxies=%d fallback_proxies=%d",
@@ -202,6 +215,149 @@ class VixSrcExtractor:
                     merged[name.strip()] = value.strip()
         return "; ".join(f"{name}={value}" for name, value in merged.items())
 
+    @staticmethod
+    def _cookie_cache_domain(url: str | None) -> str:
+        return (urlparse(url or "").hostname or "").lower().lstrip(".")
+
+    @staticmethod
+    def _cookie_header_from_items(cookies) -> str:
+        return "; ".join(
+            f"{cookie.get('name')}={cookie.get('value', '')}"
+            for cookie in (cookies or [])
+            if isinstance(cookie, dict) and cookie.get("name")
+        )
+
+    @staticmethod
+    def _read_cookie_cache() -> dict:
+        cache_path = _VIXSRC_COOKIE_FILE
+        if not os.path.exists(cache_path) and os.path.exists(_VIXSRC_LEGACY_COOKIE_FILE):
+            cache_path = _VIXSRC_LEGACY_COOKIE_FILE
+        try:
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                payload = json.load(cache_file)
+            domains = payload.get("domains", {}) if isinstance(payload, dict) else {}
+            return domains if isinstance(domains, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning("Unable to read VixSrc cookie cache: %s", exc)
+            return {}
+
+    @staticmethod
+    def _write_cookie_cache(domains: dict) -> None:
+        directory = os.path.dirname(_VIXSRC_COOKIE_FILE) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary_file = tempfile.mkstemp(
+            dir=directory,
+            prefix=".vixsrc_cookies.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as cache_file:
+                json.dump({"version": 1, "domains": domains}, cache_file, ensure_ascii=False)
+            try:
+                os.chmod(temporary_file, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary_file, _VIXSRC_COOKIE_FILE)
+        finally:
+            if os.path.exists(temporary_file):
+                try:
+                    os.unlink(temporary_file)
+                except OSError:
+                    pass
+
+    def _load_cached_solver_state(self, url: str) -> None:
+        domain = self._cookie_cache_domain(url)
+        if not domain:
+            return
+        with _VIXSRC_COOKIE_LOCK:
+            domains = self._read_cookie_cache()
+            entry = domains.get(domain)
+            if not isinstance(entry, dict):
+                return
+            try:
+                expires_at = float(entry.get("expires_at", 0) or 0)
+            except (TypeError, ValueError):
+                expires_at = 0
+            if expires_at <= time.time():
+                domains.pop(domain, None)
+                self._write_cookie_cache(domains)
+                return
+            cached_header = self._cookie_header_from_items(entry.get("cookies"))
+            if cached_header:
+                self._solver_cookie_header = self._merge_cookie_headers(
+                    self._solver_cookie_header,
+                    cached_header,
+                )
+            cached_ua = str(entry.get("user_agent") or "")
+            if cached_ua:
+                self._solver_user_agent = cached_ua
+            logger.debug("Loaded VixSrc solver cookies for %s", domain)
+
+    def _save_solver_solution(self, url: str, solution: FlareSolverrSolution) -> None:
+        domain = self._cookie_cache_domain(url) or self._cookie_cache_domain(solution.url)
+        if not domain:
+            return
+        new_cookies = [
+            dict(cookie)
+            for cookie in solution.cookies
+            if isinstance(cookie, dict) and cookie.get("name")
+        ]
+        with _VIXSRC_COOKIE_LOCK:
+            domains = self._read_cookie_cache()
+            current = domains.get(domain) if isinstance(domains.get(domain), dict) else {}
+            merged = {}
+            current_cookies = current.get("cookies", [])
+            if isinstance(current_cookies, list):
+                for cookie in current_cookies:
+                    if isinstance(cookie, dict) and cookie.get("name"):
+                        merged[str(cookie["name"])] = cookie
+            for cookie in new_cookies:
+                merged[str(cookie["name"])] = cookie
+            user_agent = solution.user_agent or str(current.get("user_agent") or "")
+            if not merged and not user_agent:
+                return
+
+            now = time.time()
+            cookie_expiries = []
+            for cookie in merged.values():
+                try:
+                    expiry = float(cookie.get("expiry", 0) or 0)
+                    if expiry > 10_000_000_000:
+                        expiry /= 1000
+                    if expiry > now:
+                        cookie_expiries.append(expiry)
+                except (TypeError, ValueError):
+                    pass
+            expires_at = min(cookie_expiries) if cookie_expiries else now + _VIXSRC_COOKIE_TTL
+            domains[domain] = {
+                "cookies": list(merged.values()),
+                "user_agent": user_agent,
+                "saved_at": now,
+                "expires_at": expires_at,
+            }
+            try:
+                self._write_cookie_cache(domains)
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning("Unable to save VixSrc cookie cache: %s", exc)
+                return
+        logger.info("Saved %d VixSrc solver cookies for %s", len(merged), domain)
+
+    def _invalidate_cached_solver_state(self, url: str) -> None:
+        domain = self._cookie_cache_domain(url)
+        if domain:
+            with _VIXSRC_COOKIE_LOCK:
+                domains = self._read_cookie_cache()
+                if domains.pop(domain, None) is not None:
+                    try:
+                        self._write_cookie_cache(domains)
+                    except OSError as exc:
+                        logger.warning("Unable to clear VixSrc cookie cache: %s", exc)
+                    logger.info("Invalidated VixSrc solver cookies for %s after 403", domain)
+        self._solver_cookie_header = self._initial_cookie_header
+        self._solver_user_agent = ""
+
     def _apply_solver_headers(self, headers: dict | None) -> dict:
         result = dict(headers or {})
         if self._solver_cookie_header:
@@ -217,7 +373,12 @@ class VixSrcExtractor:
             result["User-Agent"] = self._solver_user_agent
         return result
 
-    def _remember_solver_solution(self, solution: FlareSolverrSolution, proxy: str | None) -> None:
+    def _remember_solver_solution(
+        self,
+        solution: FlareSolverrSolution,
+        proxy: str | None,
+        url: str | None = None,
+    ) -> None:
         if solution.cookie_header:
             self._solver_cookie_header = self._merge_cookie_headers(
                 self._solver_cookie_header,
@@ -227,6 +388,7 @@ class VixSrcExtractor:
             self._solver_user_agent = solution.user_agent
         self.last_used_proxy = self._normalize_proxy_url(proxy) if proxy else None
         self.last_used_direct = proxy is None
+        self._save_solver_solution(url or solution.url, solution)
         logger.info(
             "VixSrc FlareSolverr solved challenge via %s and returned %d cookies",
             self.last_used_proxy or "direct",
@@ -244,7 +406,7 @@ class VixSrcExtractor:
             cookie_header=self._header_value(headers, "Cookie"),
             allow_direct=allow_direct,
         )
-        self._remember_solver_solution(solution, proxy)
+        self._remember_solver_solution(solution, proxy, url=url)
         return solution
 
     async def _flaresolverr_response(
@@ -260,6 +422,7 @@ class VixSrcExtractor:
         """Fetch Cloudflare-protected embeds with curl_cffi and proxy rotation."""
         from curl_cffi.requests import AsyncSession as CurlAsyncSession
 
+        self._load_cached_solver_state(url)
         proxies_to_try = await self._proxy_candidates(url, forced_proxy)
         if not proxies_to_try and forced_proxy:
             raise ExtractorError("No alive VixSrc forced proxy available")
@@ -315,6 +478,8 @@ class VixSrcExtractor:
                         return True, proxy, _CurlResponse(content, resp.status_code, url), None, resp.status_code, False
                 else:
                     is_challenge = self._is_cloudflare_challenge(content, resp.status_code)
+                if resp.status_code == 403 and not is_challenge:
+                    self._invalidate_cached_solver_state(url)
                 if proxy_value and resp.status_code not in (403, 404, 503) and not is_challenge:
                     mark_proxy_dead(proxy_value)
                 return False, proxy, None, None, resp.status_code, is_challenge
@@ -350,6 +515,9 @@ class VixSrcExtractor:
 
         if challenge_proxy is not None:
             try:
+                if last_status == 403:
+                    self._invalidate_cached_solver_state(url)
+                    final_headers = self._fresh_headers(**(headers or {}))
                 return await self._flaresolverr_response(
                     url,
                     headers=final_headers,
@@ -456,7 +624,8 @@ class VixSrcExtractor:
         self, url: str, headers: dict = None, retries: int = 2, initial_delay: int = 2, forced_proxy: str | None = None
     ):
         """Effettua richieste HTTP robuste con retry automatico e proxy rotation."""
-        final_headers = headers or {}
+        self._load_cached_solver_state(url)
+        final_headers = self._apply_solver_headers(headers or {})
         last_error = None
 
         for attempt in range(retries):
@@ -571,6 +740,7 @@ class VixSrcExtractor:
                     raise ExtractorError(f"VixSrc content not found (404): {url}")
 
                 if e.status == 403:
+                    self._invalidate_cached_solver_state(url)
                     raise ExtractorError(f"VixSrc access blocked (403): {url}") from e
 
                 if attempt == retries - 1:
