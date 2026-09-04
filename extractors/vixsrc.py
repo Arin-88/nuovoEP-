@@ -27,6 +27,10 @@ class ExtractorError(Exception):
     """Eccezione personalizzata per errori di estrazione."""
 
 
+class CloudflareChallengeError(ExtractorError):
+    """Challenge rilevata ma non superata: errore terminale, senza retry."""
+
+
 class _CurlResponse:
     """Small response adapter shared by curl_cffi and FlareSolverr results."""
 
@@ -86,6 +90,8 @@ class VixSrcExtractor:
             if domain:
                 _vixsrc_domain = domain.removeprefix("https://").removeprefix("http://").rstrip("/")
             _vixsrc_config_loaded_at = time.monotonic()
+        except CloudflareChallengeError:
+            raise
         except Exception as exc:
             logger.warning("Unable to refresh VixSrc domain config: %s", exc)
 
@@ -342,7 +348,7 @@ class VixSrcExtractor:
                 if exc:
                     last_error = exc
 
-        if challenge_proxy is not None or last_status in (403, 503):
+        if challenge_proxy is not None:
             try:
                 return await self._flaresolverr_response(
                     url,
@@ -351,11 +357,15 @@ class VixSrcExtractor:
                 )
             except Exception as solver_exc:
                 logger.warning("FlareSolverr challenge solve failed for %s: %s", url, solver_exc)
-                last_error = solver_exc
+                raise CloudflareChallengeError(
+                    f"Cloudflare challenge solve failed for {url}: {solver_exc}"
+                ) from solver_exc
 
         if last_error:
             raise ExtractorError(f"curl_cffi request failed for {url}: {last_error}")
         if last_status is not None:
+            if last_status == 403:
+                raise ExtractorError(f"VixSrc access blocked (403): {url}")
             raise ExtractorError(f"curl_cffi HTTP error {last_status} for {url}")
         raise ExtractorError(f"curl_cffi failed for {url}: no usable proxy found")
 
@@ -485,7 +495,7 @@ class VixSrcExtractor:
                             )
                         except Exception as solver_exc:
                             logger.warning("FlareSolverr failed for %s: %s", url, solver_exc)
-                            raise ExtractorError(
+                            raise CloudflareChallengeError(
                                 f"Cloudflare challenge solve failed for {url}: {solver_exc}"
                             ) from solver_exc
 
@@ -513,6 +523,9 @@ class VixSrcExtractor:
 
                     logger.info("Request successful for %s at attempt %s", url, attempt + 1)
                     return MockResponse(content, response.status, response.headers, response.url)
+
+            except CloudflareChallengeError:
+                raise
 
             except ALL_PROXY_ERRORS + (
                 aiohttp.ClientConnectionError,
@@ -558,15 +571,7 @@ class VixSrcExtractor:
                     raise ExtractorError(f"VixSrc content not found (404): {url}")
 
                 if e.status == 403:
-                    try:
-                        logger.info("aiohttp 403 detected, starting FlareSolverr for %s", url)
-                        return await self._flaresolverr_response(
-                            url,
-                            headers=final_headers or self._default_headers(),
-                            forced_proxy=forced_proxy or self.session_proxy,
-                        )
-                    except Exception as solver_exc:
-                        logger.warning("FlareSolverr failed for %s: %s", url, solver_exc)
+                    raise ExtractorError(f"VixSrc access blocked (403): {url}") from e
 
                 if attempt == retries - 1:
                     raise ExtractorError(f"Final HTTP error {e.status} for {url}: {str(e)}")
@@ -580,14 +585,37 @@ class VixSrcExtractor:
 
 
 
+    @staticmethod
+    def _is_access_blocked_page(html: str) -> bool:
+        low_html = (html or "").lower()
+        return any(
+            marker in low_html
+            for marker in (
+                "you are blocked",
+                "you have been blocked",
+                "error 1020",
+                "access denied",
+                "request blocked",
+            )
+        )
+
     def _is_cloudflare_challenge(self, html: str, status: int) -> bool:
-        """Determines if the response is a Cloudflare verification challenge screen."""
-        if status in (403, 503):
+        """Distinguish a solvable challenge from a terminal block page."""
+        if self._is_access_blocked_page(html):
+            return False
+        low_html = (html or "").lower()
+        challenge_markers = (
+            "just a moment",
+            "checking your browser",
+            "verify you are human",
+            "performing security verification",
+            "challenge-platform",
+            "cf-chl-",
+            "turnstile",
+        )
+        if any(marker in low_html for marker in challenge_markers):
             return True
-        low_html = html.lower()
-        if "cloudflare" in low_html and ("ray id" in low_html or "captcha" in low_html or "turnstile" in low_html or "challenge-platform" in low_html):
-            return True
-        return False
+        return "cloudflare" in low_html and ("ray id" in low_html or "challenge" in low_html)
 
     async def _parse_html_simple(self, html_content: str, tag: str, attrs: dict = None):
         """Parser HTML semplificato senza BeautifulSoup."""
@@ -647,6 +675,8 @@ class VixSrcExtractor:
         try:
             logger.info("Trying VixSrc API via curl_cffi proxy rotation: %s", api_url)
             response = await self._make_curl_request(api_url, headers=api_headers, forced_proxy=forced_proxy)
+        except CloudflareChallengeError:
+            raise
         except Exception as curl_err:
             # 404 means content not found — FS won't help, skip cascading fallbacks
             if "404" in str(curl_err):
@@ -874,6 +904,8 @@ class VixSrcExtractor:
                         headers=self._fresh_headers(referer=self._normalize_base_site(vix_url) + "/"),
                         forced_proxy=forced_proxy,
                     )
+                except CloudflareChallengeError:
+                    raise
                 except Exception as curl_err:
                     logger.warning("curl_cffi failed for embed %s: %s", vix_url, curl_err)
                     raise ExtractorError(f"VixSrc embed fetch failed: {curl_err}") from curl_err
@@ -910,6 +942,8 @@ class VixSrcExtractor:
                             headers=self._fresh_headers(referer=url),
                             forced_proxy=embed_proxy,
                         )
+                    except CloudflareChallengeError:
+                        raise
                     except Exception as curl_err:
                         logger.warning("curl_cffi failed for embed %s, trying robust: %s", embed_url, curl_err)
                         try:
@@ -923,6 +957,8 @@ class VixSrcExtractor:
                 else:
                     try:
                         response = await self._make_curl_request(url, forced_proxy=forced_proxy)
+                    except CloudflareChallengeError:
+                        raise
                     except Exception as curl_err:
                         logger.warning("curl_cffi failed for %s, trying robust: %s", url, curl_err)
                         try:
