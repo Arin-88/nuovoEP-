@@ -121,8 +121,7 @@ class VidLinkExtractor:
 
     @staticmethod
     def _normalize_proxy_url(proxy_url: str) -> str:
-        # Preserve local-DNS SOCKS5. This is required for the IPv4-only WARP
-        # endpoint; socks5h delegates DNS to wireproxy and can hang on AAAA.
+        # Preserve the proxy scheme selected by the routing policy.
         if proxy_url.startswith("socks5://"):
             return proxy_url
         if "://" not in proxy_url:
@@ -156,16 +155,13 @@ class VidLinkExtractor:
                 "VidLink: direct fallback disabled; no proxy route available"
             )
         request_kwargs = {}
-        curl_options = None
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
-            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
 
         try:
             async with AsyncSession(
                 impersonate="chrome124",
-                curl_options=curl_options,
             ) as session:
                 response = await session.get(
                     api_url, headers=headers, timeout=30, **request_kwargs

@@ -30,13 +30,6 @@ start_userspace_warp() {
     rm -f wgcf-profile.conf
     wgcf generate || return 1
 
-    # WARP is deliberately IPv4-only. Do not install an IPv6 default route.
-    sed -i -E '/^[[:space:]]*AllowedIPs[[:space:]]*=/ s/,[[:space:]]*::\/0//g' wgcf-profile.conf
-    if grep -Eq '^[[:space:]]*AllowedIPs[[:space:]]*=.*::\/0' wgcf-profile.conf; then
-        echo "Could not create IPv4-only WARP profile (IPv6 route remains)." >&2
-        return 1
-    fi
-
     install -m 600 wgcf-profile.conf /etc/wireguard/wg0.conf
 
     "$WARPCTL" start || return 1
@@ -47,7 +40,8 @@ start_userspace_warp() {
             echo "wireproxy exited during startup."
             return 1
         fi
-        if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT" && "$WARPCTL" probe >/dev/null 2>&1; then
+        if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT" && \
+           "$WARPCTL" probe >/dev/null 2>&1; then
             echo "WARP userspace WireGuard + wireproxy SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
             return 0
         fi

@@ -20,13 +20,11 @@ from aiohttp_socks import (
     ProxyConnectionError as AioProxyConnectionError,
     ProxyTimeoutError as AioProxyTimeoutError,
 )
-from aiohttp_socks.connector import Proxy as AiohttpSocksProxy, _ResponseHandler
 from python_socks import (
     ProxyError as PyProxyError,
     ProxyConnectionError as PyProxyConnectionError,
     ProxyTimeoutError as PyProxyTimeoutError,
 )
-
 ALL_PROXY_ERRORS = (
     AioProxyError,
     AioProxyConnectionError,
@@ -37,104 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-class _IPv4SniProxyConnector(ProxyConnector):
-    """SOCKS connector that sends an IPv4 destination but keeps TLS SNI."""
-
-    async def _wrap_create_connection(
-        self,
-        *args,
-        addr_infos,
-        req,
-        timeout,
-        client_error=None,
-        **kwargs,
-    ):
-        del args, client_error
-        try:
-            host = addr_infos[0][4][0]
-            port = addr_infos[0][4][1]
-        except (IndexError, TypeError) as exc:
-            raise ValueError("Invalid arg: `addr_infos`") from exc
-
-        ssl_context = kwargs.get("ssl")
-        # aiohttp resolves the URL before calling this method. Therefore
-        # ``host`` is normally an IPv4 literal, but TLS still needs the
-        # original hostname for SNI/certificate validation. Older versions
-        # of aiohttp did not always pass ``server_hostname`` in kwargs, so
-        # recover it from the request URL as a safe fallback.
-        request_url = getattr(req, "url", None)
-        request_hostname = (
-            getattr(request_url, "raw_host", None)
-            or getattr(request_url, "host", None)
-            or ""
-        )
-        server_hostname = (
-            request_hostname
-            or kwargs.get("server_hostname")
-            or host
-        )
-        if server_hostname.startswith("[") and server_hostname.endswith("]"):
-            server_hostname = server_hostname[1:-1]
-        try:
-            return await self._connect_via_proxy_with_sni(
-                host=host,
-                port=port,
-                ssl_context=ssl_context,
-                server_hostname=server_hostname,
-                timeout=timeout.sock_connect,
-            )
-        except PyProxyConnectionError as exc:
-            raise AioProxyConnectionError(str(exc)) from exc
-        except PyProxyTimeoutError as exc:
-            raise AioProxyTimeoutError(str(exc)) from exc
-        except PyProxyError as exc:
-            raise AioProxyError(str(exc), error_code=exc.error_code) from exc
-
-    async def _connect_via_proxy_with_sni(
-        self,
-        host: str,
-        port: int,
-        ssl_context,
-        server_hostname: str,
-        timeout: float | None,
-    ):
-        proxy = AiohttpSocksProxy(
-            proxy_type=self._proxy_type,
-            host=self._proxy_host,
-            port=self._proxy_port,
-            username=self._proxy_username,
-            password=self._proxy_password,
-            rdns=self._rdns,
-            proxy_ssl=self._proxy_ssl,
-        )
-        stream = None
-        try:
-            # SOCKS receives the already-resolved IPv4 literal.
-            stream = await proxy.connect(
-                dest_host=host,
-                dest_port=port,
-                dest_ssl=None,
-                timeout=timeout,
-            )
-            if ssl_context is not None:
-                # TLS still uses the original hostname for certificate/SNI.
-                stream = await stream.start_tls(
-                    hostname=server_hostname,
-                    ssl_context=ssl_context,
-                )
-
-            transport = stream.writer.transport
-            protocol = _ResponseHandler(loop=self._loop, writer=stream.writer)
-            transport.set_protocol(protocol)
-            protocol.connection_made(transport)
-            return transport, protocol
-        except BaseException:
-            if stream is not None:
-                await stream.close()
-            raise
-
-
-APP_VERSION = "2.11.22"
+APP_VERSION = "2.11.23"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -281,8 +182,8 @@ LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_STR, logging.WARNING)
 PROXY_TEST_TIMEOUT = 10
 cpu_cores = os.cpu_count() or 4
 PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 15))
-# Resolve WARP destinations locally as IPv4-only. socks5h would delegate DNS
-# to wireproxy, where an AAAA result could stall before the IPv4 route is tried.
+# Keep WARP as a normal dual-stack SOCKS route. The generated wgcf profile and
+# wireproxy decide which address family is usable for each destination.
 WARP_PROXY_URL = "socks5://127.0.0.1:1080"
 # Monotonic timestamp of the last real WARP connector use. Health probes do
 # not update it; EasyProxy uses it to recycle WireProxy only after true idle.
@@ -885,21 +786,10 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     # avoidable timeouts/buffering. The caller still controls pool limits and
     # idle cleanup.
     if is_warp:
-        # WARP must never resolve/connect to an IPv6 origin. Resolve locally
-        # as A-only so the SOCKS request receives an IPv4 literal. The custom
-        # connector preserves the original hostname for TLS SNI/certificates.
-        kwargs["family"] = socket.AF_INET
-        rdns = False
         kwargs.setdefault("keepalive_timeout", 15)
         kwargs.setdefault("force_close", False)
 
-    connector_class = _IPv4SniProxyConnector if is_warp else ProxyConnector
-    connector = connector_class.from_url(connector_url, rdns=rdns, **kwargs)
-    if is_warp:
-        from aiohttp.resolver import DefaultResolver
-
-        connector._resolver = DefaultResolver()
-    return connector
+    return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
 
 
 def is_warp_proxy_url(proxy_url: str | None) -> bool:
@@ -916,21 +806,8 @@ def is_warp_proxy_url(proxy_url: str | None) -> bool:
     return canonical(proxy_url) == canonical(WARP_PROXY_URL)
 
 
-def get_curl_ipv4_options(proxy_url: str | None) -> dict:
-    """Return AsyncSession constructor options forcing IPv4 for WARP only."""
-    if not is_warp_proxy_url(proxy_url):
-        return {}
-
-    try:
-        from curl_cffi.const import CurlIpResolve, CurlOpt
-    except ImportError:
-        return {}
-
-    return {"curl_options": {CurlOpt.IPRESOLVE: CurlIpResolve.V4}}
-
-
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:
-    """Normalizza il proxy per solver/browser che non supportano socks5h/socks4a."""
+    """Return a browser-safe proxy while preserving the selected route."""
     if not proxy_url:
         return None
 

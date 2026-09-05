@@ -17,6 +17,7 @@ import ssl
 logger = logging.getLogger("services.proxy")
 import yarl
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from aiohttp import (
     web,
     ClientSession,
@@ -26,9 +27,6 @@ from aiohttp import (
     ServerDisconnectedError,
     ClientConnectionError,
 )
-from aiohttp_socks import ProxyConnector, ProxyError as AioProxyError
-from python_socks import ProxyError as PyProxyError
-
 import importlib.util
 
 # Lazy check — find_spec does NOT load module, preserving startup behavior.
@@ -49,7 +47,6 @@ from config import (
     get_proxy_for_url,
     get_ssl_setting_for_url,
     get_connector_for_proxy,
-    get_curl_ipv4_options,
     API_PASSWORD,
     check_password,
     get_client_ip,

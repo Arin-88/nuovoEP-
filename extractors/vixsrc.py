@@ -117,9 +117,8 @@ class VixSrcExtractor:
     def _normalize_proxy_url(proxy_value: str) -> str:
         proxy_value = unquote(proxy_value)
         proxy_value = proxy_value.strip()
-        # Keep socks5 local-DNS semantics. In particular WARP must not become
-        # socks5h: wireproxy remote DNS can stall on AAAA lookups, while the
-        # IPv4 WARP connector already resolves the destination locally.
+        # Preserve explicit SOCKS5 routes. Scheme-less third-party proxies
+        # retain the existing socks5h default.
         if proxy_value.startswith("socks5://"):
             return proxy_value
         if proxy_value.startswith("socks4://") or proxy_value.startswith("socks4a://"):
@@ -393,8 +392,9 @@ class VixSrcExtractor:
         self.last_used_direct = proxy is None
         self._save_solver_solution(url or solution.url, solution)
         logger.info(
-            "VixSrc FlareSolverr solved challenge via %s and returned %d cookies",
+            "VixSrc FlareSolverr solved challenge: route=%s solver_proxy=%s cookies=%d",
             self.last_used_proxy or "direct",
+            get_solver_proxy_url(self.last_used_proxy) or "direct",
             len(solution.cookies),
         )
 
@@ -463,14 +463,11 @@ class VixSrcExtractor:
         async def _try_one(proxy_value: str | None, imp: str):
             request_kwargs = {}
             proxy = self._normalize_proxy_url(proxy_value) if proxy_value else None
-            curl_options = None
             if proxy:
                 request_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
             try:
                 async with CurlAsyncSession(
                     impersonate=imp,
-                    curl_options=curl_options,
                 ) as session:
                     resp = await session.get(
                         url,

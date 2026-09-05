@@ -91,7 +91,7 @@ class VavooExtractor:
 
             if self._proxy:
                 logger.debug(f"Using proxy for Vavoo session: {self._proxy}")
-                connector = get_connector_for_proxy(self._proxy, family=socket.AF_INET)
+                connector = get_connector_for_proxy(self._proxy)
             else:
                 connector = TCPConnector(
                     limit=0,
@@ -100,7 +100,6 @@ class VavooExtractor:
                     enable_cleanup_closed=True,
                     force_close=False,
                     use_dns_cache=True,
-                    family=socket.AF_INET
                 )
 
             self.session = ClientSession(

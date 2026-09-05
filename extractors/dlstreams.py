@@ -251,7 +251,7 @@ class DLStreamsExtractor:
             connector = get_connector_for_proxy(proxy_url)
             logger.debug("DLStreams: Using proxy session: %s", proxy_url)
         else:
-            connector = TCPConnector(limit=0, limit_per_host=0, family=socket.AF_INET)
+            connector = TCPConnector(limit=0, limit_per_host=0)
             logger.debug("DLStreams: Using direct session (Real IP)")
         
         timeout = ClientTimeout(total=30, connect=10)

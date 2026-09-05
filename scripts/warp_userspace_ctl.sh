@@ -83,9 +83,7 @@ probe_warp() {
         return 1
     fi
 
-    # --socks5 keeps DNS local. --ipv4 prevents an AAAA result from
-    # bypassing the IPv4-only WARP profile or stalling wireproxy.
-    trace=$(curl --ipv4 --socks5 "$SOCKS_ADDR" -fsS \
+    trace=$(curl --socks5 "$SOCKS_ADDR" -fsS \
         --connect-timeout 3 --max-time 8 "$TRACE_URL" 2>&1) || {
         echo "WARP probe: SOCKS traffic failed: $trace" >&2
         return 1
@@ -96,8 +94,8 @@ probe_warp() {
         echo "WARP probe: Cloudflare did not report warp=on/plus." >&2
         return 1
     }
-    printf '%s\n' "$trace" | grep -Eq '^ip=[0-9]+(\.[0-9]+){3}$' || {
-        echo "WARP probe: egress is not IPv4." >&2
+    printf '%s\n' "$trace" | grep -Eq '^ip=[^[:space:]]+$' || {
+        echo "WARP probe: Cloudflare did not return an egress IP." >&2
         return 1
     }
 }
