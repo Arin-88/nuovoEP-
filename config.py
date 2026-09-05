@@ -35,7 +35,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.22"
+APP_VERSION = "2.11.23"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -185,9 +185,6 @@ PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 
 # Keep WARP as a normal dual-stack SOCKS route. The generated wgcf profile and
 # wireproxy decide which address family is usable for each destination.
 WARP_PROXY_URL = "socks5://127.0.0.1:1080"
-# Native wireproxy HTTP listener used by browser-based solvers such as
-# FlareSolverr. Keep it separate from the SOCKS route used by extractors.
-WARP_HTTP_PROXY_URL = "http://127.0.0.1:1081"
 # Monotonic timestamp of the last real WARP connector use. Health probes do
 # not update it; EasyProxy uses it to recycle WireProxy only after true idle.
 WARP_LAST_ACTIVITY = 0.0
@@ -810,12 +807,9 @@ def is_warp_proxy_url(proxy_url: str | None) -> bool:
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:
-    """Return a browser-safe proxy; WARP uses wireproxy's native HTTP listener."""
+    """Return a browser-safe proxy while preserving the selected route."""
     if not proxy_url:
         return None
-
-    if is_warp_proxy_url(proxy_url):
-        return WARP_HTTP_PROXY_URL
 
     if proxy_url.startswith("socks5h://"):
         return proxy_url.replace("socks5h://", "socks5://", 1)

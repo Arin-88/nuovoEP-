@@ -7,7 +7,6 @@ WIREPROXY_CONFIG="/tmp/easyproxy-warp/wireproxy.conf"
 LOG_FILE="/var/log/wireproxy.log"
 WIREPROXY_BIN="/usr/local/bin/wireproxy"
 SOCKS_ADDR="127.0.0.1:1080"
-HTTP_ADDR="127.0.0.1:1081"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 
 pid_is_wireproxy() {
@@ -25,8 +24,7 @@ read_pid() {
 
 write_wireproxy_config() {
     cp "$CONFIG_FILE" "$WIREPROXY_CONFIG"
-    printf '\n[Socks5]\nBindAddress = %s\n\n[http]\nBindAddress = %s\n' \
-        "$SOCKS_ADDR" "$HTTP_ADDR" >> "$WIREPROXY_CONFIG"
+    printf '\n[Socks5]\nBindAddress = %s\n' "$SOCKS_ADDR" >> "$WIREPROXY_CONFIG"
     chmod 600 "$WIREPROXY_CONFIG"
 }
 

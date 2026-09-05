@@ -35,7 +35,7 @@ RUN set -eux; \
     pip install --no-cache-dir -r /opt/flaresolverr/requirements.txt; \
     rm -rf /opt/flaresolverr/.git
 
-# WARP config generator and stable userspace SOCKS5/HTTP relays.
+# WARP config generator and stable userspace SOCKS5 relay.
 ARG WGCF_VERSION=2.2.29
 ARG WIREPROXY_VERSION=1.1.2
 RUN set -eux; \

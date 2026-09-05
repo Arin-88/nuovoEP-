@@ -4,12 +4,11 @@ export PYTHONPATH=/app
 WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"
 WARP_PROXY_HOST="127.0.0.1"
 WARP_PROXY_PORT="1080"
-WARP_HTTP_PROXY_PORT="1081"
 WARP_DIR="/tmp/easyproxy-warp"
 WARPCTL="/app/scripts/warp_userspace_ctl.sh"
 
 start_userspace_warp() {
-    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace SOCKS5/HTTP..."
+    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace SOCKS5..."
 
     if ! command -v wgcf >/dev/null 2>&1 || \
        ! command -v wireproxy >/dev/null 2>&1; then
@@ -35,22 +34,21 @@ start_userspace_warp() {
 
     "$WARPCTL" start || return 1
 
-    echo "Waiting for wireproxy SOCKS5/HTTP on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}/${WARP_HTTP_PROXY_PORT}..."
+    echo "Waiting for wireproxy SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
     for i in $(seq 1 20); do
         if ! "$WARPCTL" status >/dev/null 2>&1; then
             echo "wireproxy exited during startup."
             return 1
         fi
         if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT" && \
-           nc -z "$WARP_PROXY_HOST" "$WARP_HTTP_PROXY_PORT" && \
            "$WARPCTL" probe >/dev/null 2>&1; then
-            echo "WARP userspace WireGuard + wireproxy SOCKS5/HTTP ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}/${WARP_HTTP_PROXY_PORT}."
+            echo "WARP userspace WireGuard + wireproxy SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
             return 0
         fi
         sleep 1
     done
 
-    echo "wireproxy SOCKS5/HTTP not detected."
+    echo "wireproxy SOCKS5 not detected."
     return 1
 }
 
