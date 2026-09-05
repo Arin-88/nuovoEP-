@@ -40,6 +40,24 @@ class MPDToHLSConverter:
         # HLS clients (notably VLC) commonly advertise HEVC as hvc1,
         # while DASH manifests use the equivalent hev1 sample entry.
         return re.sub(r"^hev1(?=\.|$)", "hvc1", codec)
+
+    @staticmethod
+    def _nominal_segment_duration_units(segments):
+        """Return a stable duration for live MEDIA-SEQUENCE calculations.
+
+        Live DASH audio timelines can alternate a few milliseconds around the
+        nominal duration.  Using the first segment's duration makes the HLS
+        sequence jump when the rolling window starts on a different sample.
+        The median is stable across those small variations.
+        """
+        durations = sorted(
+            int(segment.get("d", 0))
+            for segment in segments
+            if int(segment.get("d", 0)) > 0
+        )
+        if not durations:
+            return 1
+        return max(1, durations[len(durations) // 2])
     
     def _extract_header_params(self, params: str) -> str:
         """Estrae solo i parametri necessari dalla query string originale.
@@ -464,26 +482,26 @@ class MPDToHLSConverter:
                                             timeline = r_template.find('mpd:SegmentTimeline', self.ns)
                                             if timeline is not None:
                                                 first_t = None
-                                                last_t = None
-                                                last_d = 0
+                                                current_t = None
+                                                last_end = None
                                                 for s in timeline.findall('mpd:S', self.ns):
                                                     t = s.get('t')
                                                     if t:
-                                                        temp_t = int(t)
-                                                        if first_t is None:
-                                                            first_t = temp_t
-                                                        last_t = temp_t
+                                                        current_t = int(t)
+                                                    elif current_t is None:
+                                                        current_t = 0
+                                                    if first_t is None:
+                                                        first_t = current_t
                                                     d = int(s.get('d'))
                                                     r_rep = int(s.get('r', '0'))
-                                                    if last_t is not None:
-                                                        last_t += d * r_rep
-                                                        last_d = d
+                                                    last_end = current_t + d * (r_rep + 1)
+                                                    current_t = last_end
                                                 if first_t is not None:
                                                     first_seg_time_sec = first_t / r_timescale
                                                     if first_seg_time_sec > global_first_time_sec:
                                                         global_first_time_sec = first_seg_time_sec
-                                                if last_t is not None:
-                                                    last_seg_time_sec = (last_t + last_d) / r_timescale
+                                                if last_end is not None:
+                                                    last_seg_time_sec = last_end / r_timescale
                                                     if last_seg_time_sec > global_last_time_sec:
                                                         global_last_time_sec = last_seg_time_sec
 
@@ -516,7 +534,9 @@ class MPDToHLSConverter:
                             segments_to_use = [all_segments[-1]]
 
                         first_window_seg = segments_to_use[0]
-                        sequence_duration_units = max(1, int(first_window_seg['d']))
+                        sequence_duration_units = self._nominal_segment_duration_units(
+                            all_segments
+                        )
                         sequence_time = first_window_seg['time'] - presentation_time_offset
                         sequence_preview = int(round(sequence_time / sequence_duration_units))
                         logger.debug(f"📐 [Window] rep={rep_id} edge={global_last_time_sec:.1f} first={global_first_time_sec:.1f} win={window_start_sec:.1f} segs={len(segments_to_use)} start_ts={segments_to_use[0]['time']/timescale:.1f} seq={sequence_preview}")
@@ -539,11 +559,36 @@ class MPDToHLSConverter:
                             first_seg_time_sec = first_seg['time'] / timescale
                             # DASH live manifests may reset startNumber to 1
                             # on every rolling window.  Build a stable HLS
-                            # sequence from media time and the actual segment
-                            # duration (the log shows 1.6 s, not 2 s).
-                            duration_units = max(1, int(first_seg['d']))
+                            # sequence from media time and the nominal segment
+                            # duration.  Do not use the first segment duration:
+                            # audio timelines legitimately alternate by a few
+                            # milliseconds and that made MEDIA-SEQUENCE jump.
+                            duration_units = self._nominal_segment_duration_units(
+                                all_segments
+                            )
                             media_time = first_seg['time'] - presentation_time_offset
                             media_sequence = int(round(media_time / duration_units))
+
+                            # A provider/CDN can briefly return an older rolling
+                            # window.  HLS clients treat a backwards sequence as
+                            # a playlist reset and may stop playback, so keep the
+                            # sequence monotonic for this live representation.
+                            sequence_key = f"{original_url.split('?')[0]}::{rep_id}"
+                            if not hasattr(self.__class__, '_last_sequences'):
+                                self.__class__._last_sequences = {}
+                            previous_sequence = self.__class__._last_sequences.get(
+                                sequence_key
+                            )
+                            if (
+                                previous_sequence is not None
+                                and media_sequence < previous_sequence
+                            ):
+                                media_sequence = previous_sequence
+                            self.__class__._last_sequences[sequence_key] = media_sequence
+                            while len(self.__class__._last_sequences) > 512:
+                                self.__class__._last_sequences.pop(
+                                    next(iter(self.__class__._last_sequences))
+                                )
                             
                             lines.append(f'#EXT-X-TARGETDURATION:{int(max_duration) + 1}')
                             lines.append(f'#EXT-X-MEDIA-SEQUENCE:{media_sequence}')

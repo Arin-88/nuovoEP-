@@ -1786,7 +1786,6 @@ class HLSProxyStreamingMixin:
                     finally:
                         if (
                             retry_session
-                            and retry_proxy
                             and not retry_session.closed
                         ):
                             await retry_session.close()
@@ -1802,7 +1801,7 @@ class HLSProxyStreamingMixin:
                             "Recovered ClearKey segment request through a fresh WARP session"
                         )
             finally:
-                if segment_session and segment_proxy and not segment_session.closed:
+                if segment_session and not segment_session.closed:
                     await segment_session.close()
 
             if init_content is None and init_url:
