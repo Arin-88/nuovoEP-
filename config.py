@@ -117,7 +117,7 @@ class _IPv4SniProxyConnector(ProxyConnector):
             raise
 
 
-APP_VERSION = "2.11.19"
+APP_VERSION = "2.11.20"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
