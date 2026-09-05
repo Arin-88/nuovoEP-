@@ -17,6 +17,28 @@ logger = logging.getLogger(__name__)
 class ExtractorError(Exception):
     pass
 
+
+class MockResponse:
+    """Small response adapter shared by text and binary extractor results."""
+
+    def __init__(self, text, status, headers, url, cookies):
+        self.text = text
+        self.status = status
+        self.status_code = status
+        self.headers = headers
+        self.url = url
+        self.cookies = cookies
+
+    @property
+    def json(self):
+        import json
+
+        try:
+            return json.loads(self.text)
+        except Exception:
+            return {}
+
+
 class BaseExtractor:
     """Base class for extractors with robust networking and proxy fallback."""
     
@@ -75,7 +97,8 @@ class BaseExtractor:
         final_headers = headers or {}
         if "User-Agent" not in final_headers:
             final_headers["User-Agent"] = self.base_headers["User-Agent"]
-            
+
+        session = None
         for attempt in range(retries):
             try:
                 session = await self._get_session(url)
@@ -92,23 +115,7 @@ class BaseExtractor:
                         return MockResponse("", response.status, response.headers, str(response.url), response.cookies)
 
                     content = await response.text()
-                    
-                    class MockResponse:
-                        def __init__(self, text, status, headers, url, cookies):
-                            self.text = text
-                            self.status = status
-                            self.headers = headers
-                            self.url = url
-                            self.cookies = cookies
-                        
-                        @property
-                        def json(self):
-                            import json
-                            try:
-                                return json.loads(self.text)
-                            except Exception:
-                                return {}
-                    
+
                     return MockResponse(content, response.status, response.headers, str(response.url), response.cookies)
             except ALL_PROXY_ERRORS + (asyncio.TimeoutError, ClientConnectionError, aiohttp.ClientResponseError) as e:
                 is_proxy_err = isinstance(e, ALL_PROXY_ERRORS)

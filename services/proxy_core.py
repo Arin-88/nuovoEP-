@@ -665,9 +665,22 @@ class HLSProxyCoreMixin:
         if _shared.BYPASS_PROXIES_CONTEXT.get():
             forced_proxy = None
 
-        # Stale proxy sessions cleanup (>60s idle, aligned with connector keepalive_timeout).
-        # WARP session stays pooled, but its connector never keeps upstream TCP
-        # connections alive; the WireProxy process/tunnel remains available.
+        # A generated manifest/segment URL can outlive an admin toggle and
+        # still carry the old WARP proxy in its query string. WARP=off or the
+        # admin WARP switch must invalidate that stale route before selecting
+        # a connector; otherwise direct mode still tries 127.0.0.1:1080.
+        if forced_proxy and _config.is_warp_proxy_url(forced_proxy) and (
+            bypass_warp or not _config._get_dynamic_warp_enabled()
+        ):
+            logger.debug(
+                "Ignoring stale WARP route %s (WARP bypassed/disabled)",
+                forced_proxy,
+            )
+            forced_proxy = None
+
+        # Stale proxy sessions cleanup (>60s idle, aligned with connector
+        # keepalive_timeout). The WARP session stays pooled; reusable upstream
+        # sockets avoid rebuilding SOCKS+TLS for every media request.
         if hasattr(self, "_proxy_session_atimes"):
             now = time.time()
             _warp_url = _shared.WARP_PROXY_URL

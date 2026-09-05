@@ -10,7 +10,7 @@ import uuid
 from aiohttp import ClientConnectionError, ClientSession, ClientTimeout, TCPConnector
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs
-from config import BYPASS_PROXIES_CONTEXT, BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
+from config import BYPASS_WARP_CONTEXT, get_connector_for_proxy, get_preferred_proxy_for_url
 import config as _cfg
 
 logger = logging.getLogger(__name__)
@@ -60,21 +60,27 @@ class VavooExtractor:
 
     async def _get_session(self):
         async with self._session_lock:
-            bypass_proxies = BYPASS_PROXIES_CONTEXT.get()
-            if bypass_proxies and self.session is not None and not self.session.closed:
-                await self.session.close()
-                self.session = None
-                self._proxy = None
-            if self.session is not None and not self.session.closed:
+            bypass_warp = BYPASS_WARP_CONTEXT.get()
+            # Re-evaluate on every call: the admin WARP toggle can change while
+            # this cached extractor is still alive.
+            selected_proxy = await get_preferred_proxy_for_url(
+                self._resolve_url,
+                "vavoo",
+                self.proxies,
+                bypass_warp,
+            )
+
+            if (
+                self.session is not None
+                and not self.session.closed
+                and self._proxy == selected_proxy
+            ):
                 return self.session
 
-            if self._proxy is None:
-                self._proxy = await get_preferred_proxy_for_url(
-                    self._resolve_url,
-                    "vavoo",
-                    self.proxies,
-                    BYPASS_WARP_CONTEXT.get(),
-                )
+            if self.session is not None and not self.session.closed:
+                await self.session.close()
+            self.session = None
+            self._proxy = selected_proxy
 
             if self._proxy is None and not _cfg.is_direct_connection_allowed():
                 raise ClientConnectionError(
@@ -194,7 +200,13 @@ class VavooExtractor:
                     else:
                         logger.warning(f"Vavoo ping {url}: status {resp.status}")
             except Exception as e:
-                logger.warning(f"Vavoo ping {url} failed: {e}")
+                logger.warning(
+                    "Vavoo ping %s failed via %s: %s: %r",
+                    url,
+                    self._proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
         return None
 
     async def _get_sig(self, force: bool = False) -> Optional[str]:

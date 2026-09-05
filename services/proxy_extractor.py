@@ -16,6 +16,7 @@ import config_store
 import asyncio
 import base64
 import urllib.parse
+import config as _config
 from yarl import URL
 from services.proxy_shared import seal_clearkey
 
@@ -72,6 +73,14 @@ class HLSProxyExtractorHandlerMixin:
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
+        if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
+            bypass_warp or not _config._get_dynamic_warp_enabled()
+        ):
+            logger.debug(
+                "Ignoring stale WARP proxy from extractor request: %s",
+                selected_proxy,
+            )
+            selected_proxy = None
         proxy_token = SELECTED_PROXY_CONTEXT.set(selected_proxy)
         strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(selected_proxy))
         url = None
@@ -247,11 +256,20 @@ class HLSProxyExtractorHandlerMixin:
                     )
                     selected_proxy = None
 
-                # ✅ FIX: Resetta SELECTED_PROXY_CONTEXT al valore effettivo.
-                # get_preferred_proxy_for_url (chiamato dall'estrattore in _get_session)
-                # setta questo context a un proxy, ma dopo aver deciso selected_proxy
-                # vogliamo che le chiamate successive PARTANO DA QUESTO STATO.
-                SELECTED_PROXY_CONTEXT.set(selected_proxy)
+            if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
+                bypass_warp or not _config._get_dynamic_warp_enabled()
+            ):
+                logger.debug(
+                    "Ignoring stale WARP route after extractor selection: %s",
+                    selected_proxy,
+                )
+                selected_proxy = None
+
+            # ✅ FIX: Resetta SELECTED_PROXY_CONTEXT al valore effettivo.
+            # get_preferred_proxy_for_url (chiamato dall'estrattore in _get_session)
+            # setta questo context a un proxy, ma dopo aver deciso selected_proxy
+            # vogliamo che le chiamate successive PARTANO DA QUESTO STATO.
+            SELECTED_PROXY_CONTEXT.set(selected_proxy)
 
             force_direct = result.get("force_direct", False)
             bypass_warp = result.get("bypass_warp", bypass_warp)
@@ -263,10 +281,22 @@ class HLSProxyExtractorHandlerMixin:
             if admin_warp_off:
                 bypass_warp = True
                 BYPASS_WARP_CONTEXT.set(True)
-                if _shared.WARP_PROXY_URL and selected_proxy == _shared.WARP_PROXY_URL:
+                if selected_proxy and _config.is_warp_proxy_url(selected_proxy):
                     selected_proxy = None
             if admin_proxy_off:
                 BYPASS_PROXIES_CONTEXT.set(True)
+
+            # The extractor can return a route after the first validation. Apply
+            # the effective WARP policy one final time before generating URLs.
+            if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
+                bypass_warp or not _config._get_dynamic_warp_enabled()
+            ):
+                logger.debug(
+                    "Ignoring stale WARP route before redirect: %s",
+                    selected_proxy,
+                )
+                selected_proxy = None
+            SELECTED_PROXY_CONTEXT.set(selected_proxy)
 
             logger.debug(f"Extractor Debug: Extractor result selected_proxy: {selected_proxy}")
 

@@ -43,7 +43,17 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
     proxies = []
     selected_proxy = SELECTED_PROXY_CONTEXT.get()
     if selected_proxy and STRICT_PROXY_CONTEXT.get():
-        return [selected_proxy]
+        # A relay URL may carry a WARP proxy selected before the admin switch
+        # changed. Never freeze that stale route into a cached extractor.
+        if not (
+            _config.is_warp_proxy_url(selected_proxy)
+            and (
+                BYPASS_WARP_CONTEXT.get()
+                or not _config._get_dynamic_warp_enabled()
+            )
+        ):
+            return [selected_proxy]
+        selected_proxy = None
     if BYPASS_PROXIES_CONTEXT.get():
         return []
     extractor_proxies = get_extractor_proxies(extractor_name or "")
@@ -59,7 +69,7 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
         + list(_GLOBAL_PROXIES)
     )
     for proxy in candidates:
-        if proxy == _config.WARP_PROXY_URL:
+        if _config.is_warp_proxy_url(proxy):
             continue
         if proxy and proxy not in proxies:
             proxies.append(proxy)
@@ -68,7 +78,7 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
         _config.ENABLE_WARP
         and not BYPASS_WARP_CONTEXT.get()
         and not _config._is_warp_excluded(extractor_name or "")
-        and _config.WARP_PROXY_URL not in proxies
+        and not any(_config.is_warp_proxy_url(proxy) for proxy in proxies)
     ):
         proxies.append(_config.WARP_PROXY_URL)
     return proxies
@@ -441,7 +451,7 @@ async def resolve_extractor(self, url: str, request_headers: dict, host: str = N
             return self.extractors[key]
         elif _is_sportsonline_candidate(url):
             key = _cache_key("sportsonline", bypass_warp)
-            proxy = _resolve_sportsonline_proxy(url)
+            proxy = _resolve_sportsonline_proxy(url, bypass_warp=bypass_warp)
             proxy_list = _build_proxy_list(proxy, "sportsonline")
             if key not in self.extractors:
                 self.extractors[key] = SportsonlineExtractor(
