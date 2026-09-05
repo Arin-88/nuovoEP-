@@ -75,7 +75,7 @@ def _build_proxy_list(primary_proxy: str | None = None, extractor_name: str | No
             proxies.append(proxy)
 
     if (
-        _config.ENABLE_WARP
+        _config._get_dynamic_warp_enabled()
         and not BYPASS_WARP_CONTEXT.get()
         and not _config._is_warp_excluded(extractor_name or "")
         and not any(_config.is_warp_proxy_url(proxy) for proxy in proxies)

@@ -321,7 +321,7 @@ class HLSProxyManifestHandlerMixin:
                             captured_manifest = await resp.text()
                             stream_url = str(resp.url)
                     finally:
-                        if mpd_proxy_used:
+                        if mpd_session and not mpd_session.closed:
                             await mpd_session.close()
 
                 # Encode DASH routing state into base64 token (stateless, no server-side session)
@@ -572,6 +572,12 @@ class HLSProxyManifestHandlerMixin:
                                 mpd_proxy,
                                 extractor_key=request.query.get("extractor_key"),
                             )
+                        if mpd_proxy:
+                            # A pooled SOCKS connector can remain open while
+                            # WireProxy's tunnel is stale. Reusing it for the
+                            # retry only repeats the same timeout; force the
+                            # next attempt to create a fresh route session.
+                            await self._invalidate_proxy_session(mpd_proxy)
                         # Clear sticky context if it's a proxy error
                         if is_proxy and SELECTED_PROXY_CONTEXT.get() and not STRICT_PROXY_CONTEXT.get():
                             logger.info("   [MPD] Clearing sticky proxy context due to ProxyError")
@@ -588,7 +594,7 @@ class HLSProxyManifestHandlerMixin:
                             return web.Response(text=f"Unexpected error fetching MPD: {e}", status=500)
                         await asyncio.sleep(1)
                     finally:
-                        if mpd_session and mpd_proxy:
+                        if mpd_session and not mpd_session.closed:
                             await mpd_session.close()
 
                 if manifest_content is None:
