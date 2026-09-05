@@ -864,30 +864,53 @@ class HLSProxyManifestHandlerMixin:
             ) or type(e).__name__ == "ExtractorError"
             is_corrupt = "corrupt" in error_msg or "not available" in error_msg
             extractor_name = extractor_name_for_log(extractor)
+            raw_log_proxy = request.query.get("proxy") or (
+                getattr(extractor, "last_used_proxy", None)
+                or getattr(extractor, "selected_proxy", None)
+                or getattr(extractor, "_session_proxy", None)
+                or getattr(extractor, "session_proxy", None)
+            )
+            if raw_log_proxy and str(raw_log_proxy).lower() == "off":
+                raw_log_proxy = None
+            error_context = request_log_context(
+                request,
+                target_url,
+                route=safe_log_route(raw_log_proxy),
+                extractor=extractor,
+            )
 
             if is_expired_embed:
                 logger.info(
                     "Expired VixSrc embed URL rejected: %s [%s]",
                     e,
-                    request_log_context(request, target_url, extractor=extractor),
+                    error_context,
                 )
                 return web.Response(text=str(e), status=410)
             if is_corrupt:
-                logger.warning(f"⚠️ {extractor_name}: Content is corrupt or not available - {str(e)}")
+                logger.warning(
+                    "⚠️ %s: Content is corrupt or not available - %s [%s]",
+                    extractor_name,
+                    e,
+                    error_context,
+                )
                 return web.Response(text=f"Content corrupt or not available: {str(e)}", status=404)
             if is_not_found:
-                logger.warning(f"🔍 {extractor_name}: Content not found (404) - {str(e)}")
+                logger.warning(
+                    "🔍 %s: Content not found (404) - %s [%s]",
+                    extractor_name,
+                    e,
+                    error_context,
+                )
                 return web.Response(text=f"Content not found: {str(e)}", status=404)
             if is_temporary_error:
                 logger.warning(
                     "📡 %s: Service temporarily unavailable - %s [%s]",
                     extractor_name,
                     e,
-                    request_log_context(request, target_url, extractor=extractor),
+                    error_context,
                 )
                 return web.Response(text=f"Service temporarily unavailable: {str(e)}", status=503)
 
-            error_context = request_log_context(request, target_url, extractor=extractor)
             logger.critical("❌ Critical error: %s [%s]", e, error_context)
             logger.exception("Error in proxy request [%s]", error_context)
             return web.Response(text=f"Proxy error: {str(e)}", status=500)

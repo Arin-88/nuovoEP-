@@ -511,10 +511,16 @@ class HLSProxyExtractorHandlerMixin:
             ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)) or type(e).__name__ == "ExtractorError"  # ponytail: expected extractor failures shouldn't print a traceback
 
             error_desc = str(e) or type(e).__name__
+            log_proxy = selected_proxy or (
+                getattr(extractor, "last_used_proxy", None)
+                or getattr(extractor, "selected_proxy", None)
+                or getattr(extractor, "_session_proxy", None)
+                or getattr(extractor, "session_proxy", None)
+            )
             error_context = request_log_context(
                 request,
                 url,
-                route=safe_log_route(selected_proxy),
+                route=safe_log_route(log_proxy),
                 extractor=extractor,
             )
             if isinstance(e, asyncio.CancelledError):

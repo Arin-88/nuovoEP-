@@ -100,10 +100,16 @@ def request_log_context(request=None, target_url: str | None = None, route: str 
         request_type = "manifest"
     else:
         request_type = "request"
+    if query.get("direct_hls") == "1":
+        extractor_fallback = "direct_hls"
+    elif path.startswith("/proxy/hls/") or path.startswith("/proxy/mpd/"):
+        extractor_fallback = "generic_hls"
+    else:
+        extractor_fallback = "unknown"
     requested = query.get("orig_url") or query.get("original_channel_url") or query.get("url") or query.get("d")
     route_text = route or "unknown"
     return (
-        f"extractor={extractor_log_name(request, extractor)} "
+        f"extractor={extractor_log_name(request, extractor, extractor_fallback)} "
         f"type={request_type} route={route_text} "
         f"requested={safe_log_endpoint(requested)} target={safe_log_endpoint(target_url)}"
     )
