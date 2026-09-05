@@ -327,9 +327,11 @@ class HLSProxyCoreMixin:
                 f"ip={self._warp_ip or 'unknown'}"
             )
         except Exception as exc:
+            detail = " ".join(str(exc).split())[:240]
+            suffix = f" detail={detail}" if detail else ""
             return False, (
                 f"component=warp_tunnel process={process_state} socks=up "
-                f"error={type(exc).__name__}"
+                f"error={type(exc).__name__}{suffix}"
             )
 
     async def _warp_keepalive(self):
