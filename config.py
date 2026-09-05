@@ -888,7 +888,7 @@ def is_warp_proxy_url(proxy_url: str | None) -> bool:
 
 
 def get_curl_ipv4_options(proxy_url: str | None) -> dict:
-    """Return curl_cffi options that force IPv4 for the WARP route only."""
+    """Return AsyncSession constructor options forcing IPv4 for WARP only."""
     if not is_warp_proxy_url(proxy_url):
         return {}
 

@@ -149,11 +149,15 @@ class VidXgoExtractor:
             request_kwargs = {
                 "proxies": {"http": proxy_url, "https": proxy_url}
             } if proxy_url else {}
+            curl_options = None
             if proxy_url:
-                request_kwargs.update(_cfg.get_curl_ipv4_options(proxy_url))
+                curl_options = _cfg.get_curl_ipv4_options(proxy_url).get("curl_options")
             try:
                 logger.info("vidxgo curl fetch via %s for %s", proxy_url or "direct", url)
-                async with CurlAsyncSession(impersonate="chrome124") as session:
+                async with CurlAsyncSession(
+                    impersonate="chrome124",
+                    curl_options=curl_options,
+                ) as session:
                     resp = await session.get(
                         url,
                         headers=curl_headers,

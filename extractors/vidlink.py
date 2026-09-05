@@ -154,13 +154,17 @@ class VidLinkExtractor:
                 "VidLink: direct fallback disabled; no proxy route available"
             )
         request_kwargs = {}
+        curl_options = None
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
-            request_kwargs.update(_cfg.get_curl_ipv4_options(proxy))
+            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
 
         try:
-            async with AsyncSession(impersonate="chrome124") as session:
+            async with AsyncSession(
+                impersonate="chrome124",
+                curl_options=curl_options,
+            ) as session:
                 response = await session.get(
                     api_url, headers=headers, timeout=30, **request_kwargs
                 )

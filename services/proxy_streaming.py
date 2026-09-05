@@ -854,7 +854,13 @@ class HLSProxyStreamingMixin:
                 logger.info(f"🚀 [curl_cffi] Using browser impersonation for: {stream_url}")
                 curl_s = None
                 try:
-                    curl_s = get_curl_async_session()(impersonate="chrome124")
+                    curl_options = get_curl_ipv4_options(session_proxy).get(
+                        "curl_options"
+                    )
+                    curl_s = get_curl_async_session()(
+                        impersonate="chrome124",
+                        curl_options=curl_options,
+                    )
                     curl_headers = prepare_curl_headers(stream_url, headers)
 
 
@@ -871,7 +877,6 @@ class HLSProxyStreamingMixin:
                         final_curl_url,
                         headers=curl_headers,
                         proxies=curl_proxies,
-                        **get_curl_ipv4_options(session_proxy),
                         verify=not disable_ssl,
                         timeout=30,
                         stream=True,
