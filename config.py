@@ -284,6 +284,9 @@ PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 
 # Resolve WARP destinations locally as IPv4-only. socks5h would delegate DNS
 # to wireproxy, where an AAAA result could stall before the IPv4 route is tried.
 WARP_PROXY_URL = "socks5://127.0.0.1:1080"
+# Native wireproxy HTTP listener used by browser-based solvers such as
+# FlareSolverr. Keep it separate from the SOCKS route used by extractors.
+WARP_HTTP_PROXY_URL = "http://127.0.0.1:1081"
 # Monotonic timestamp of the last real WARP connector use. Health probes do
 # not update it; EasyProxy uses it to recycle WireProxy only after true idle.
 WARP_LAST_ACTIVITY = 0.0
@@ -930,9 +933,12 @@ def get_curl_ipv4_options(proxy_url: str | None) -> dict:
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:
-    """Normalizza il proxy per solver/browser che non supportano socks5h/socks4a."""
+    """Return a browser-safe proxy; WARP uses wireproxy's native HTTP listener."""
     if not proxy_url:
         return None
+
+    if is_warp_proxy_url(proxy_url):
+        return WARP_HTTP_PROXY_URL
 
     if proxy_url.startswith("socks5h://"):
         return proxy_url.replace("socks5h://", "socks5://", 1)

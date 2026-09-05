@@ -4,11 +4,12 @@ export PYTHONPATH=/app
 WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"
 WARP_PROXY_HOST="127.0.0.1"
 WARP_PROXY_PORT="1080"
+WARP_HTTP_PROXY_PORT="1081"
 WARP_DIR="/tmp/easyproxy-warp"
 WARPCTL="/app/scripts/warp_userspace_ctl.sh"
 
 start_userspace_warp() {
-    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace SOCKS5..."
+    echo "Starting Cloudflare WARP via wgcf + wireproxy userspace SOCKS5/HTTP..."
 
     if ! command -v wgcf >/dev/null 2>&1 || \
        ! command -v wireproxy >/dev/null 2>&1; then
@@ -30,10 +31,14 @@ start_userspace_warp() {
     rm -f wgcf-profile.conf
     wgcf generate || return 1
 
-    # WARP is deliberately IPv4-only. Do not install an IPv6 default route.
+    # WARP is deliberately IPv4-only. Remove IPv6 from the tunnel address,
+    # DNS list, and routes so wireproxy's native HTTP listener cannot select
+    # an unreachable IPv6 destination for browser traffic.
     sed -i -E '/^[[:space:]]*AllowedIPs[[:space:]]*=/ s/,[[:space:]]*::\/0//g' wgcf-profile.conf
-    if grep -Eq '^[[:space:]]*AllowedIPs[[:space:]]*=.*::\/0' wgcf-profile.conf; then
-        echo "Could not create IPv4-only WARP profile (IPv6 route remains)." >&2
+    sed -i -E '/^[[:space:]]*Address[[:space:]]*=/ s/,[[:space:]]*[0-9A-Fa-f:]+\/128//g' wgcf-profile.conf
+    sed -i -E '/^[[:space:]]*DNS[[:space:]]*=/ s/,[[:space:]]*[0-9A-Fa-f:]*:[0-9A-Fa-f:]+//g' wgcf-profile.conf
+    if grep -Eq '^[[:space:]]*(Address|DNS|AllowedIPs)[[:space:]]*=.*:' wgcf-profile.conf; then
+        echo "Could not create IPv4-only WARP profile (IPv6 setting remains)." >&2
         return 1
     fi
 
@@ -41,20 +46,22 @@ start_userspace_warp() {
 
     "$WARPCTL" start || return 1
 
-    echo "Waiting for wireproxy SOCKS5 on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}..."
+    echo "Waiting for wireproxy SOCKS5/HTTP on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}/${WARP_HTTP_PROXY_PORT}..."
     for i in $(seq 1 20); do
         if ! "$WARPCTL" status >/dev/null 2>&1; then
             echo "wireproxy exited during startup."
             return 1
         fi
-        if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT" && "$WARPCTL" probe >/dev/null 2>&1; then
-            echo "WARP userspace WireGuard + wireproxy SOCKS5 ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}."
+        if nc -z "$WARP_PROXY_HOST" "$WARP_PROXY_PORT" && \
+           nc -z "$WARP_PROXY_HOST" "$WARP_HTTP_PROXY_PORT" && \
+           "$WARPCTL" probe >/dev/null 2>&1; then
+            echo "WARP userspace WireGuard + wireproxy SOCKS5/HTTP ready on ${WARP_PROXY_HOST}:${WARP_PROXY_PORT}/${WARP_HTTP_PROXY_PORT}."
             return 0
         fi
         sleep 1
     done
 
-    echo "wireproxy SOCKS5 not detected."
+    echo "wireproxy SOCKS5/HTTP not detected."
     return 1
 }
 

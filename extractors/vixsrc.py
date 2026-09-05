@@ -393,8 +393,9 @@ class VixSrcExtractor:
         self.last_used_direct = proxy is None
         self._save_solver_solution(url or solution.url, solution)
         logger.info(
-            "VixSrc FlareSolverr solved challenge via %s and returned %d cookies",
+            "VixSrc FlareSolverr solved challenge: route=%s solver_proxy=%s cookies=%d",
             self.last_used_proxy or "direct",
+            get_solver_proxy_url(self.last_used_proxy) or "direct",
             len(solution.cookies),
         )
 
