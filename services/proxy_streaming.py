@@ -1438,7 +1438,15 @@ class HLSProxyStreamingMixin:
             return web.Response(status=401, text="Unauthorized: Invalid API Password")
 
         url = request.query.get("url")
-        logger.info(f"🔓 Decrypt Request: {url.split('/')[-1] if url else 'unknown'}")
+        requested_media_type = request.query.get("media_type", "").lower() or "unknown"
+        request_target = url or request.query.get("init_url")
+        segment_name = os.path.basename(urllib.parse.urlsplit(request_target).path) if request_target else "unknown"
+        decrypt_started = time.monotonic()
+        logger.info(
+            "🔓 Decrypt Request: track=%s segment=%s",
+            requested_media_type,
+            segment_name or "unknown",
+        )
 
         init_url = request.query.get("init_url")
         key = request.query.get("key")
@@ -1512,7 +1520,9 @@ class HLSProxyStreamingMixin:
                             ssl=not disable_ssl,
                             timeout=aiohttp.ClientTimeout(total=timeout),
                         ) as resp:
-                            if resp.status == 200:
+                            # CDN may return 206 for valid range-based DASH
+                            # segments; treat it like a successful fetch.
+                            if resp.status in (200, 206):
                                 content = await resp.read()
                                 if content:
                                     return content, False
@@ -1633,6 +1643,14 @@ class HLSProxyStreamingMixin:
                 source_name = (url or init_url or "").lower()
                 media_type = "audio" if "track_audio" in source_name else "video"
             content_type = "audio/mp4" if media_type == "audio" else "video/mp4"
+
+            logger.info(
+                "✅ [Decrypt] Completed: track=%s bytes=%d elapsed=%.2fs proxy=%s",
+                media_type,
+                len(ts_content),
+                time.monotonic() - decrypt_started,
+                segment_proxy or "direct",
+            )
 
             # Invia Risposta
             return web.Response(

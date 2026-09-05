@@ -86,13 +86,50 @@ class MPDToHLSConverter:
                 elif 'audio' in mime_type or 'audio' in content_type:
                     audio_sets.append(adaptation_set)
             
-            # Fallback per detection
-            if not video_sets and not audio_sets:
-                for adaptation_set in root.findall('.//mpd:AdaptationSet', self.ns):
-                    if adaptation_set.find('mpd:Representation[@mimeType="video/mp4"]', self.ns) is not None:
-                        video_sets.append(adaptation_set)
-                    elif adaptation_set.find('mpd:Representation[@mimeType="audio/mp4"]', self.ns) is not None:
-                        audio_sets.append(adaptation_set)
+            # Fallback per detection a livello Representation.
+            # Va eseguito indipendentemente per video e audio: un MPD può
+            # dichiarare l'audio su AdaptationSet e il video solo sui figli.
+            def representation_matches(rep, kind):
+                rep_type = ' '.join(
+                    (
+                        rep.get('mimeType', ''),
+                        rep.get('contentType', ''),
+                    )
+                ).lower()
+                if kind in rep_type:
+                    return True
+
+                codecs = rep.get('codecs', '').lower()
+                if kind == 'video':
+                    return bool(
+                        rep.get('width')
+                        or rep.get('height')
+                        or any(codec in codecs for codec in (
+                            'avc', 'hev', 'hvc', 'vp8', 'vp9', 'av01'
+                        ))
+                    )
+                return any(codec in codecs for codec in (
+                    'mp4a', 'aac', 'ac-3', 'ec-3', 'opus', 'vorbis'
+                ))
+
+            for adaptation_set in root.findall('.//mpd:AdaptationSet', self.ns):
+                representations = adaptation_set.findall('mpd:Representation', self.ns)
+                if (
+                    adaptation_set not in video_sets
+                    and any(representation_matches(rep, 'video') for rep in representations)
+                ):
+                    video_sets.append(adaptation_set)
+                if (
+                    adaptation_set not in audio_sets
+                    and any(representation_matches(rep, 'audio') for rep in representations)
+                ):
+                    audio_sets.append(adaptation_set)
+
+            logger.debug(
+                "MPD master tracks detected: video=%d audio=%d",
+                len(video_sets),
+                len(audio_sets),
+            )
 
             # --- GESTIONE AUDIO (EXT-X-MEDIA) ---
             audio_group_id = 'audio'
