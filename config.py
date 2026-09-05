@@ -751,7 +751,8 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
         return None
 
     health_check = bool(kwargs.pop("health_check", False))
-    if proxy_url == WARP_PROXY_URL and not health_check:
+    is_warp = is_warp_proxy_url(proxy_url)
+    if is_warp and not health_check:
         global WARP_LAST_ACTIVITY
         WARP_LAST_ACTIVITY = time.monotonic()
 
@@ -770,11 +771,48 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     # WARP tunnel resta vivo; connessioni upstream no. Evita che ogni
     # extractor mantenga socket CDN idle dentro WireProxy. force_close=True
     # chiude il socket a fine response senza limitare concorrenza.
-    if proxy_url == WARP_PROXY_URL:
+    if is_warp:
+        # WARP must never resolve/connect to an IPv6 origin.  aiohttp-socks
+        # normally uses NoResolver with socks5h; resolve locally as A-only so
+        # python-socks receives an IPv4 literal and cannot pick AAAA.
+        kwargs["family"] = socket.AF_INET
+        rdns = False
         kwargs["force_close"] = True
         kwargs.pop("keepalive_timeout", None)
 
-    return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
+    connector = ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
+    if is_warp:
+        from aiohttp.resolver import DefaultResolver
+
+        connector._resolver = DefaultResolver()
+    return connector
+
+
+def is_warp_proxy_url(proxy_url: str | None) -> bool:
+    """Return True for the configured WARP SOCKS endpoint (socks5h/socks5)."""
+    if not proxy_url or not WARP_PROXY_URL:
+        return False
+
+    def canonical(value: str) -> str:
+        value = str(value).strip().rstrip("/")
+        if value.startswith("socks5h://"):
+            value = "socks5://" + value[len("socks5h://") :]
+        return value
+
+    return canonical(proxy_url) == canonical(WARP_PROXY_URL)
+
+
+def get_curl_ipv4_options(proxy_url: str | None) -> dict:
+    """Return curl_cffi options that force IPv4 for the WARP route only."""
+    if not is_warp_proxy_url(proxy_url):
+        return {}
+
+    try:
+        from curl_cffi.const import CurlIpResolve, CurlOpt
+    except ImportError:
+        return {}
+
+    return {"curl_options": {CurlOpt.IPRESOLVE: CurlIpResolve.V4}}
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:

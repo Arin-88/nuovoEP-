@@ -49,6 +49,7 @@ from config import (
     get_proxy_for_url,
     get_ssl_setting_for_url,
     get_connector_for_proxy,
+    get_curl_ipv4_options,
     API_PASSWORD,
     check_password,
     get_client_ip,

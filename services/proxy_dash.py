@@ -1,6 +1,6 @@
 import time
 import aiohttp
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from config import STRICT_PROXY_CONTEXT
 import services.proxy_shared as _shared
 from services.proxy_shared import (
@@ -35,7 +35,49 @@ def _decode_dash_state(token: str) -> tuple[str, dict, str | None] | None:
     return data.get("b", ""), data.get("h", {}), data.get("k")
 
 
+def _safe_endpoint(url: str | None) -> str:
+    """Log scheme/host/path without query tokens or credentials."""
+    parsed = urlparse(url or "")
+    if not parsed.netloc:
+        return "unknown"
+    path = parsed.path or "/"
+    if len(path) > 160:
+        path = path[:157] + "..."
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _safe_route(proxy: str | None) -> str:
+    """Identify route without logging proxy credentials."""
+    if not proxy:
+        return "direct"
+    if proxy == _shared.WARP_PROXY_URL:
+        return "WARP"
+    parsed = urlparse(proxy)
+    if parsed.hostname:
+        return f"proxy({parsed.scheme or 'unknown'}://{parsed.hostname})"
+    return "proxy"
+
+
 class HLSProxyDashMixin:
+
+    @staticmethod
+    def _key_context(request, key_url: str, proxy_used: str | None, forced_proxy: str | None, bypass_warp: bool) -> str:
+        strict = bool(forced_proxy or STRICT_PROXY_CONTEXT.get())
+        if strict and bypass_warp:
+            policy = "strict,warp-off"
+        elif strict:
+            policy = "strict"
+        elif bypass_warp:
+            policy = "warp-off"
+        else:
+            policy = "normal"
+        extractor = request.query.get("extractor_key") or "unknown"
+        source = _safe_endpoint(request.query.get("original_channel_url"))
+        route = _safe_route(proxy_used or forced_proxy)
+        return (
+            f"key={_safe_endpoint(key_url)} source={source} extractor={extractor} "
+            f"route={route} policy={policy}"
+        )
 
     async def handle_dash_segment(self, request):
         """Proxy for native DASH segments with optional ClearKey decryption. Stateless."""
@@ -292,7 +334,14 @@ class HLSProxyDashMixin:
                     else:
                         if request.transport.is_closing():
                             return web.Response(status=499)
-                        logger.error(f"❌ Key fetch failed with status: {resp.status}")
+                        key_context = self._key_context(
+                            request, key_url, proxy_used, forced_proxy, bypass_warp
+                        )
+                        logger.warning(
+                            "AES key rejected: status=%s %s",
+                            resp.status,
+                            key_context,
+                        )
                         if proxy_used and not forced_proxy:
                             self._mark_proxy_dead_if_allowed(
                                 proxy_used,
@@ -300,7 +349,12 @@ class HLSProxyDashMixin:
                             )
                             new_proxy = get_proxy_for_url(key_url, bypass_warp=bypass_warp)
                             if new_proxy and new_proxy != proxy_used:
-                                logger.info(f"🔐 Key fetch failed via proxy {proxy_used}, trying rotated proxy: {new_proxy}")
+                                logger.info(
+                                    "AES key retry via alternate route: %s -> %s (%s)",
+                                    _safe_route(proxy_used),
+                                    _safe_route(new_proxy),
+                                    key_context,
+                                )
                                 fallback_session = None
                                 try:
                                     fallback_session, _ = await self._get_proxy_session(key_url, bypass_warp=bypass_warp, forced_proxy=new_proxy)
@@ -322,13 +376,19 @@ class HLSProxyDashMixin:
                                     if fallback_session and not fallback_session.closed:
                                         await fallback_session.close()
                             elif not new_proxy and (forced_proxy or STRICT_PROXY_CONTEXT.get()):
-                                logger.warning("🔐 Strict proxy mode: no fallback proxy, skipping direct")
+                                logger.warning(
+                                    "AES key direct fallback blocked: no alternate route (%s)",
+                                    key_context,
+                                )
                                 return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
 
                         if forced_proxy or STRICT_PROXY_CONTEXT.get():
-                            logger.warning("🔐 Strict proxy mode: skipping direct fallback")
+                            logger.warning(
+                                "AES key direct fallback blocked by strict policy (%s)",
+                                key_context,
+                            )
                             return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
-                        logger.warning("🔐 Key fetch failed; direct fallback disabled")
+                        logger.warning("AES key request giving up; direct fallback disabled (%s)", key_context)
 
                         # --- LOGICA DI INVALIDAZIONE AUTOMATICA ---
                         url_param = request.query.get("original_channel_url")
@@ -362,14 +422,27 @@ class HLSProxyDashMixin:
                 if request.transport.is_closing():
                     return web.Response(status=499)
                 if proxy_used and not forced_proxy:
-                    logger.warning(f"🔐 Key fetch failed with exception via proxy {proxy_used}: {e}. Checking dead policy and trying fallback...")
+                    key_context = self._key_context(
+                        request, key_url, proxy_used, forced_proxy, bypass_warp
+                    )
+                    logger.warning(
+                        "AES key connection failed: error=%s detail=%s (%s); checking alternate route",
+                        type(e).__name__,
+                        str(e),
+                        key_context,
+                    )
                     self._mark_proxy_dead_if_allowed(
                         proxy_used,
                         extractor_key=request.query.get("extractor_key"),
                     )
                     new_proxy = get_proxy_for_url(key_url, bypass_warp=bypass_warp)
                     if new_proxy and new_proxy != proxy_used:
-                        logger.info(f"🔐 Key fetch failed, trying rotated proxy: {new_proxy}")
+                        logger.info(
+                            "AES key retry via alternate route: %s -> %s (%s)",
+                            _safe_route(proxy_used),
+                            _safe_route(new_proxy),
+                            key_context,
+                        )
                         fallback_session = None
                         try:
                             fallback_session, _ = await self._get_proxy_session(key_url, bypass_warp=bypass_warp, forced_proxy=new_proxy)
@@ -391,14 +464,26 @@ class HLSProxyDashMixin:
                             if fallback_session and not fallback_session.closed:
                                 await fallback_session.close()
                     elif not new_proxy:
-                        logger.warning("🔐 Strict proxy mode: no fallback proxy available")
+                        logger.warning(
+                            "AES key direct fallback blocked: no alternate route (%s)",
+                            key_context,
+                        )
                         return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
                 
                 if forced_proxy or STRICT_PROXY_CONTEXT.get():
-                    logger.warning("🔐 Strict proxy mode: skipping direct fallback")
+                    key_context = self._key_context(
+                        request, key_url, proxy_used, forced_proxy, bypass_warp
+                    )
+                    logger.warning(
+                        "AES key direct fallback blocked by strict policy (%s)",
+                        key_context,
+                    )
                     return web.Response(text="Proxy failed and strict mode prevents direct fallback", status=502)
                 
-                logger.warning("🔐 Key fetch failed; direct fallback disabled")
+                key_context = self._key_context(
+                    request, key_url, proxy_used, forced_proxy, bypass_warp
+                )
+                logger.warning("AES key request giving up; direct fallback disabled (%s)", key_context)
                 raise e
 
         except Exception as e:

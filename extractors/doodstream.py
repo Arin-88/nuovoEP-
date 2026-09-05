@@ -131,6 +131,7 @@ class DoodStreamExtractor:
         request_kwargs = {}
         if normalized_proxy:
             request_kwargs["proxies"] = {"http": normalized_proxy, "https": normalized_proxy}
+            request_kwargs.update(_cfg.get_curl_ipv4_options(normalized_proxy))
 
         async with AsyncSession(impersonate="chrome124") as session:
             response = await session.get(
