@@ -15,10 +15,12 @@ from config_store import (
     get_all as _cfg_get_all,
 )
 from aiohttp_socks import (
+    ProxyConnector,
     ProxyError as AioProxyError,
     ProxyConnectionError as AioProxyConnectionError,
     ProxyTimeoutError as AioProxyTimeoutError,
 )
+from aiohttp_socks.connector import Proxy as AiohttpSocksProxy, _ResponseHandler
 from python_socks import (
     ProxyError as PyProxyError,
     ProxyConnectionError as PyProxyConnectionError,
@@ -35,7 +37,87 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.18"
+class _IPv4SniProxyConnector(ProxyConnector):
+    """SOCKS connector that sends an IPv4 destination but keeps TLS SNI."""
+
+    async def _wrap_create_connection(
+        self,
+        *args,
+        addr_infos,
+        req,
+        timeout,
+        client_error=None,
+        **kwargs,
+    ):
+        del args, req, client_error
+        try:
+            host = addr_infos[0][4][0]
+            port = addr_infos[0][4][1]
+        except IndexError as exc:
+            raise ValueError("Invalid arg: `addr_infos`") from exc
+
+        ssl_context = kwargs.get("ssl")
+        server_hostname = kwargs.get("server_hostname") or host
+        try:
+            return await self._connect_via_proxy_with_sni(
+                host=host,
+                port=port,
+                ssl_context=ssl_context,
+                server_hostname=server_hostname,
+                timeout=timeout.sock_connect,
+            )
+        except PyProxyConnectionError as exc:
+            raise AioProxyConnectionError(str(exc)) from exc
+        except PyProxyTimeoutError as exc:
+            raise AioProxyTimeoutError(str(exc)) from exc
+        except PyProxyError as exc:
+            raise AioProxyError(str(exc), error_code=exc.error_code) from exc
+
+    async def _connect_via_proxy_with_sni(
+        self,
+        host: str,
+        port: int,
+        ssl_context,
+        server_hostname: str,
+        timeout: float | None,
+    ):
+        proxy = AiohttpSocksProxy(
+            proxy_type=self._proxy_type,
+            host=self._proxy_host,
+            port=self._proxy_port,
+            username=self._proxy_username,
+            password=self._proxy_password,
+            rdns=self._rdns,
+            proxy_ssl=self._proxy_ssl,
+        )
+        stream = None
+        try:
+            # SOCKS receives the already-resolved IPv4 literal.
+            stream = await proxy.connect(
+                dest_host=host,
+                dest_port=port,
+                dest_ssl=None,
+                timeout=timeout,
+            )
+            if ssl_context is not None:
+                # TLS still uses the original hostname for certificate/SNI.
+                stream = await stream.start_tls(
+                    hostname=server_hostname,
+                    ssl_context=ssl_context,
+                )
+
+            transport = stream.writer.transport
+            protocol = _ResponseHandler(loop=self._loop, writer=stream.writer)
+            transport.set_protocol(protocol)
+            protocol.connection_made(transport)
+            return transport, protocol
+        except BaseException:
+            if stream is not None:
+                await stream.close()
+            raise
+
+
+APP_VERSION = "2.11.19"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -182,7 +264,9 @@ LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_STR, logging.WARNING)
 PROXY_TEST_TIMEOUT = 10
 cpu_cores = os.cpu_count() or 4
 PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 15))
-WARP_PROXY_URL = "socks5h://127.0.0.1:1080"
+# Resolve WARP destinations locally as IPv4-only. socks5h would delegate DNS
+# to wireproxy, where an AAAA result could stall before the IPv4 route is tried.
+WARP_PROXY_URL = "socks5://127.0.0.1:1080"
 # Monotonic timestamp of the last real WARP connector use. Health probes do
 # not update it; EasyProxy uses it to recycle WireProxy only after true idle.
 WARP_LAST_ACTIVITY = 0.0
@@ -751,7 +835,8 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
         return None
 
     health_check = bool(kwargs.pop("health_check", False))
-    if proxy_url == WARP_PROXY_URL and not health_check:
+    is_warp = is_warp_proxy_url(proxy_url)
+    if is_warp and not health_check:
         global WARP_LAST_ACTIVITY
         WARP_LAST_ACTIVITY = time.monotonic()
 
@@ -770,11 +855,49 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     # WARP tunnel resta vivo; connessioni upstream no. Evita che ogni
     # extractor mantenga socket CDN idle dentro WireProxy. force_close=True
     # chiude il socket a fine response senza limitare concorrenza.
-    if proxy_url == WARP_PROXY_URL:
+    if is_warp:
+        # WARP must never resolve/connect to an IPv6 origin. Resolve locally
+        # as A-only so the SOCKS request receives an IPv4 literal. The custom
+        # connector preserves the original hostname for TLS SNI/certificates.
+        kwargs["family"] = socket.AF_INET
+        rdns = False
         kwargs["force_close"] = True
         kwargs.pop("keepalive_timeout", None)
 
-    return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
+    connector_class = _IPv4SniProxyConnector if is_warp else ProxyConnector
+    connector = connector_class.from_url(connector_url, rdns=rdns, **kwargs)
+    if is_warp:
+        from aiohttp.resolver import DefaultResolver
+
+        connector._resolver = DefaultResolver()
+    return connector
+
+
+def is_warp_proxy_url(proxy_url: str | None) -> bool:
+    """Return True for the configured WARP SOCKS endpoint (socks5h/socks5)."""
+    if not proxy_url or not WARP_PROXY_URL:
+        return False
+
+    def canonical(value: str) -> str:
+        value = str(value).strip().rstrip("/")
+        if value.startswith("socks5h://"):
+            value = "socks5://" + value[len("socks5h://") :]
+        return value
+
+    return canonical(proxy_url) == canonical(WARP_PROXY_URL)
+
+
+def get_curl_ipv4_options(proxy_url: str | None) -> dict:
+    """Return curl_cffi options that force IPv4 for the WARP route only."""
+    if not is_warp_proxy_url(proxy_url):
+        return {}
+
+    try:
+        from curl_cffi.const import CurlIpResolve, CurlOpt
+    except ImportError:
+        return {}
+
+    return {"curl_options": {CurlOpt.IPRESOLVE: CurlIpResolve.V4}}
 
 
 def get_solver_proxy_url(proxy_url: str | None) -> str | None:

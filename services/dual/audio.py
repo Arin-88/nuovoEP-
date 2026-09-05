@@ -97,6 +97,16 @@ class AudioStore:
         if not all(valid_public_url(url) for url in segments):
             raise ValueError("audio segment URL is not public HTTPS")
 
+    @staticmethod
+    def source_fingerprint(segments):
+        """Return the stable fingerprint used by the shared offset cache."""
+        stable = [urlparse(url).path for url in segments[:3]]
+        if not stable:
+            return ""
+        return hashlib.sha1(
+            ("|".join(stable) + str(len(segments))).encode()
+        ).hexdigest()[:20]
+
     async def register(self, playlist: str, key_b64: str, media_key: str,
                        language: str, base_url: str = "", headers: dict | None = None,
                        routing: RoutingOptions | None = None):
@@ -151,9 +161,7 @@ class AudioStore:
                 "language": language,
                 "headers": safe_headers,
                 "routing": routing,
-                "source_fingerprint": hashlib.sha1(
-                    ("|".join(stable) + str(len(segments))).encode()
-                ).hexdigest()[:20],
+                "source_fingerprint": self.source_fingerprint(segments),
             }
             self._remember(hid, metadata, key)
         return hid

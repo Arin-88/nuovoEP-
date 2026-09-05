@@ -157,6 +157,7 @@ class VidLinkExtractor:
         if proxy:
             proxy = self._normalize_proxy_url(proxy)
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
+            request_kwargs.update(_cfg.get_curl_ipv4_options(proxy))
 
         try:
             async with AsyncSession(impersonate="chrome124") as session:

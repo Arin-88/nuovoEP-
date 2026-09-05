@@ -462,6 +462,7 @@ class VixSrcExtractor:
             proxy = self._normalize_proxy_url(proxy_value) if proxy_value else None
             if proxy:
                 request_kwargs["proxies"] = {"http": proxy, "https": proxy}
+                request_kwargs.update(_cfg.get_curl_ipv4_options(proxy))
             try:
                 async with CurlAsyncSession(impersonate=imp) as session:
                     resp = await session.get(

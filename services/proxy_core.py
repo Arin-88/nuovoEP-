@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -259,7 +260,10 @@ class HLSProxyCoreMixin:
         _ENABLE_WARP = _shared.ENABLE_WARP
         _WARP_PROXY_URL = _shared.WARP_PROXY_URL
         if not _ENABLE_WARP or not _WARP_PROXY_URL:
+            self._warp_ip = ""
             return False, "WARP disabled or proxy URL missing"
+
+        self._warp_ip = ""
 
         process_state, process_detail = await self._wireproxy_process_state()
         socket_error = None
@@ -306,15 +310,28 @@ class HLSProxyCoreMixin:
                     f"warp={warp_state or 'unknown'}"
                 )
 
-            self._warp_ip = trace.get("ip", "")
+            warp_ip = trace.get("ip", "")
+            try:
+                ip_version = ipaddress.ip_address(warp_ip).version
+            except ValueError:
+                ip_version = None
+            if ip_version != 4:
+                return False, (
+                    f"component=warp_tunnel process={process_state} socks=up "
+                    f"warp={warp_state} egress=ipv6-or-unknown ip={warp_ip or 'unknown'}"
+                )
+
+            self._warp_ip = warp_ip
             return True, (
                 f"process={process_state} socks=up warp={warp_state} "
                 f"ip={self._warp_ip or 'unknown'}"
             )
         except Exception as exc:
+            detail = " ".join(str(exc).split())[:240]
+            suffix = f" detail={detail}" if detail else ""
             return False, (
                 f"component=warp_tunnel process={process_state} socks=up "
-                f"error={type(exc).__name__}"
+                f"error={type(exc).__name__}{suffix}"
             )
 
     async def _warp_keepalive(self):

@@ -702,6 +702,7 @@ class HLSProxyStreamingMixin:
                         final_curl_url,
                         headers=curl_headers,
                         proxies=curl_proxies,
+                        **get_curl_ipv4_options(session_proxy),
                         verify=not disable_ssl,
                         timeout=30,
                         stream=True,
