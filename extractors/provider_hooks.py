@@ -10,7 +10,15 @@ DYNAMIC_WARP_BYPASS_DOMAINS = (
     "strem.fun",
     "torrentio.strem.fun",
 )
-PROTECTED_CURL_DOMAINS = ("cinemacity.cc", "torrentio", "strem.fun", "strmd.st")
+PROTECTED_CURL_DOMAINS = (
+    "cinemacity.cc",
+    "torrentio",
+    "strem.fun",
+    "strmd.st",
+    # VidXgo CDN playlists/segments are served from *.d2b.you and are
+    # noticeably slower through the generic aiohttp path.
+    "d2b.you",
+)
 MANIFEST_ONLY_CURL_DOMAINS = ("torrentio", "strem.fun")
 
 
