@@ -129,11 +129,15 @@ class DoodStreamExtractor:
         self.last_used_proxy = normalized_proxy
         logger.info("DoodStream: curl_cffi using %s", normalized_proxy or "direct connection")
         request_kwargs = {}
+        curl_options = None
         if normalized_proxy:
             request_kwargs["proxies"] = {"http": normalized_proxy, "https": normalized_proxy}
-            request_kwargs.update(_cfg.get_curl_ipv4_options(normalized_proxy))
+            curl_options = _cfg.get_curl_ipv4_options(normalized_proxy).get("curl_options")
 
-        async with AsyncSession(impersonate="chrome124") as session:
+        async with AsyncSession(
+            impersonate="chrome124",
+            curl_options=curl_options,
+        ) as session:
             response = await session.get(
                 embed_url,
                 headers={"User-Agent": _DOOD_UA},

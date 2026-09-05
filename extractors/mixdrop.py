@@ -113,17 +113,19 @@ class MixdropExtractor:
                             "Mixdrop: direct fallback disabled; no proxy route available"
                         )
                     cs_proxies = _build_cs_proxies(pref_p)
-                    curl_options = _cfg.get_curl_ipv4_options(pref_p)
+                    curl_options = _cfg.get_curl_ipv4_options(pref_p).get("curl_options")
                     
                     async def fetch_page():
                         try:
-                            async with AsyncSession(impersonate="chrome120") as s:
+                            async with AsyncSession(
+                                impersonate="chrome120",
+                                curl_options=curl_options,
+                            ) as s:
                                 resp = await s.get(
                                     current_url,
                                     headers=m_headers,
                                     timeout=30,
                                     proxies=cs_proxies,
-                                    **curl_options,
                                 )
                                 if resp.status_code == 200:
                                     t = resp.text

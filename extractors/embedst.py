@@ -172,11 +172,17 @@ class EmbedStExtractor(BaseExtractor):
         logger.info("EmbedSt: streamed.pk -> %s", resolved[:80])
         return resolved
 
-    async def _get_curl_session(self):
+    async def _get_curl_session(self, curl_options=None):
         """Get or create a persistent curl_cffi session."""
         if self._curl_session is None:
             from curl_cffi import AsyncSession
-            self._curl_session = AsyncSession(impersonate="chrome124")
+            self._curl_session = AsyncSession(
+                impersonate="chrome124",
+                curl_options=curl_options or {},
+            )
+        else:
+            # curl_cffi accepts curl_options on the session, not on .get().
+            self._curl_session.curl_options = curl_options or {}
         return self._curl_session
 
     async def _fetch_manifest(self, url: str, headers: dict) -> str | None:
@@ -188,11 +194,12 @@ class EmbedStExtractor(BaseExtractor):
                 "EmbedSt: direct fallback disabled; no proxy route available"
             )
         request_kwargs = {}
+        curl_options = None
         if proxy:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
-            request_kwargs.update(_cfg.get_curl_ipv4_options(proxy))
+            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
         try:
-            s = await self._get_curl_session()
+            s = await self._get_curl_session(curl_options)
             resp = await s.get(
                 url,
                 headers=headers,
