@@ -61,6 +61,8 @@ class VavooExtractor:
     async def _get_session(self):
         async with self._session_lock:
             bypass_warp = BYPASS_WARP_CONTEXT.get()
+            warp_enabled = bool(_cfg._get_dynamic_warp_enabled())
+            warp_excluded = bool(_cfg._is_warp_excluded(self._resolve_url))
             # Re-evaluate on every call: the admin WARP toggle can change while
             # this cached extractor is still alive.
             selected_proxy = await get_preferred_proxy_for_url(
@@ -68,6 +70,27 @@ class VavooExtractor:
                 "vavoo",
                 self.proxies,
                 bypass_warp,
+            )
+
+            # Guard against a stale/empty route result: with WARP enabled, Vavoo
+            # must never silently fall back to a direct socket.
+            if (
+                selected_proxy is None
+                and warp_enabled
+                and not bypass_warp
+                and not warp_excluded
+            ):
+                selected_proxy = _cfg.WARP_PROXY_URL
+
+            direct_allowed = _cfg.is_direct_connection_allowed(bypass_warp)
+            logger.debug(
+                "Vavoo routing: proxy=%s warp_enabled=%s excluded=%s "
+                "bypass_warp=%s direct_allowed=%s ipv4_only=yes",
+                selected_proxy or "DIRECT",
+                warp_enabled,
+                warp_excluded,
+                bypass_warp,
+                direct_allowed,
             )
 
             if (
@@ -82,7 +105,7 @@ class VavooExtractor:
             self.session = None
             self._proxy = selected_proxy
 
-            if self._proxy is None and not _cfg.is_direct_connection_allowed():
+            if self._proxy is None and not direct_allowed:
                 raise ClientConnectionError(
                     "Vavoo: direct fallback disabled; no proxy route available"
                 )
@@ -91,9 +114,14 @@ class VavooExtractor:
 
             if self._proxy:
                 logger.debug(f"Using proxy for Vavoo session: {self._proxy}")
-                connector = get_connector_for_proxy(self._proxy)
+                connector = get_connector_for_proxy(
+                    self._proxy,
+                    force_ipv4=True,
+                    rdns=False,
+                )
             else:
                 connector = TCPConnector(
+                    family=socket.AF_INET,
                     limit=0,
                     limit_per_host=0,
                     keepalive_timeout=15,
