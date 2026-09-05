@@ -51,8 +51,7 @@ start_userspace_warp() {
     return 1
 }
 
-# No supervisor/restart loop: wireproxy starts once. Health checks report failure;
-# reconnect is explicit/manual only.
+# EasyProxy watchdog checks wireproxy/WARP and reconnects after consecutive failures.
 cleanup() {
     "$WARPCTL" stop >/dev/null 2>&1 || true
 }

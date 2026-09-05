@@ -654,8 +654,12 @@ class HLSProxyManifestHandlerMixin:
             is_not_found = "404" in error_msg or "not found" in error_msg
             is_temporary_error = any(
                 x in error_msg
-                for x in ["403", "forbidden", "502", "bad gateway", "timeout", "connection", "temporarily unavailable"]
-            )
+                for x in [
+                    "403", "forbidden", "502", "bad gateway", "timeout", "connection",
+                    "temporarily unavailable", "no usable proxy route",
+                    "no proxy route available", "direct fallback disabled",
+                ]
+            ) or type(e).__name__ == "ExtractorError"
             is_corrupt = "corrupt" in error_msg or "not available" in error_msg
             extractor_name = extractor_name_for_log(extractor)
 
