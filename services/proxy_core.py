@@ -232,80 +232,142 @@ class HLSProxyCoreMixin:
         return False
 
 
-    async def _warp_keepalive(self):
-        """Periodically test WARP tunnel without restarting it automatically."""
-        while True:
-            try:
-                await asyncio.sleep(30)
-                _ENABLE_WARP = _shared.ENABLE_WARP
-                _WARP_PROXY_URL = _shared.WARP_PROXY_URL
-                if not _ENABLE_WARP or not _WARP_PROXY_URL:
-                    continue
-                try:
-                    connector = get_connector_for_proxy(
-                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
-                    )
-                    timeout = ClientTimeout(total=8)
-                    async with ClientSession(connector=connector, timeout=timeout) as session:
-                        async with session.get("https://api.ipify.org?format=json") as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                self._warp_ip = data.get("ip", "")
-                                continue
-                except Exception:
-                    pass
-                logger.warning("WARP health check failed; automatic reconnect is disabled")
-            except Exception as e:
-                logger.error("WARP keepalive error: %s", e)
-                await asyncio.sleep(10)
+    async def _wireproxy_process_state(self) -> tuple[str, str]:
+        """Return wireproxy process state without confusing it with tunnel state."""
+        control_script = "/app/scripts/warp_userspace_ctl.sh"
+        if not os.path.exists(control_script):
+            return "unknown", "control script unavailable"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                control_script,
+                "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3)
+            detail = (stdout or stderr).decode("utf-8", "replace").strip()
+            if proc.returncode == 0:
+                return "up", detail or "status=running"
+            return "down", detail or f"status exit={proc.returncode}"
+        except asyncio.TimeoutError:
+            return "unknown", "status check timeout"
+        except Exception as exc:
+            return "unknown", f"status check error={type(exc).__name__}"
 
-    async def is_warp_healthy(self, timeout_sec: float = 3.0) -> bool:
-        """Fast check if WARP proxy socket and HTTP connectivity are working."""
+    async def _probe_warp(self, timeout_sec: float = 8.0) -> tuple[bool, str]:
+        """Check wireproxy process, SOCKS listener, and real WARP HTTP path."""
         _ENABLE_WARP = _shared.ENABLE_WARP
         _WARP_PROXY_URL = _shared.WARP_PROXY_URL
         if not _ENABLE_WARP or not _WARP_PROXY_URL:
-            return False
+            return False, "WARP disabled or proxy URL missing"
+
+        process_state, process_detail = await self._wireproxy_process_state()
+        socket_error = None
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", 1080),
+                timeout=min(3.0, timeout_sec),
+            )
+            writer.close()
+            await writer.wait_closed()
+        except Exception as exc:
+            socket_error = type(exc).__name__
+
+        if socket_error:
+            component = "wireproxy_process" if process_state == "down" else "wireproxy_socket"
+            return False, (
+                f"component={component} process={process_state}({process_detail}) "
+                f"socks=down error={socket_error}"
+            )
+
         try:
             connector = get_connector_for_proxy(
                 _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
             )
             timeout = ClientTimeout(total=timeout_sec)
             async with ClientSession(connector=connector, timeout=timeout) as session:
-                async with session.get("https://api.ipify.org?format=json") as resp:
-                    if resp.status == 200:
-                        return True
-        except Exception:
-            pass
-        return False
+                async with session.get("https://www.cloudflare.com/cdn-cgi/trace") as resp:
+                    body = await resp.text()
+
+            trace = {
+                line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+                for line in body.splitlines()
+                if "=" in line
+            }
+            warp_state = trace.get("warp", "").lower()
+            if resp.status != 200:
+                return False, (
+                    f"component=warp_tunnel process={process_state} socks=up "
+                    f"http_status={resp.status}"
+                )
+            if warp_state not in {"on", "plus"}:
+                return False, (
+                    f"component=warp_tunnel process={process_state} socks=up "
+                    f"warp={warp_state or 'unknown'}"
+                )
+
+            self._warp_ip = trace.get("ip", "")
+            return True, (
+                f"process={process_state} socks=up warp={warp_state} "
+                f"ip={self._warp_ip or 'unknown'}"
+            )
+        except Exception as exc:
+            return False, (
+                f"component=warp_tunnel process={process_state} socks=up "
+                f"error={type(exc).__name__}"
+            )
+
+    async def _warp_keepalive(self):
+        """Probe WARP periodically and reconnect after consecutive failures."""
+        consecutive_failures = 0
+        while True:
+            try:
+                await asyncio.sleep(30)
+                if not _shared.ENABLE_WARP or not _shared.WARP_PROXY_URL:
+                    consecutive_failures = 0
+                    continue
+
+                healthy, reason = await self._probe_warp(timeout_sec=8)
+                if healthy:
+                    if consecutive_failures:
+                        logger.warning(
+                            "WARP health recovered after %s failed probe(s)",
+                            consecutive_failures,
+                        )
+                    consecutive_failures = 0
+                    continue
+
+                consecutive_failures += 1
+                logger.warning(
+                    "WARP health check failed (%s/2): %s",
+                    consecutive_failures,
+                    reason,
+                )
+                if consecutive_failures < 2:
+                    continue
+
+                result = await self.reconnect_warp()
+                message = result.get("message", "")
+                if result.get("status") == "ok" and message == "WARP userspace tunnel reconnected":
+                    logger.warning("WARP auto-reconnect succeeded")
+                    consecutive_failures = 0
+                else:
+                    logger.warning("WARP auto-reconnect skipped/failed: %s", message or result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("WARP keepalive error: %s", e)
+                await asyncio.sleep(10)
+
+    async def is_warp_healthy(self, timeout_sec: float = 3.0) -> bool:
+        """Fast check if WARP proxy socket and HTTP connectivity are working."""
+        healthy, _reason = await self._probe_warp(timeout_sec=timeout_sec)
+        return healthy
 
     async def get_warp_status(self) -> str:
         """Returns WARP status and fetches real external IP through WARP proxy."""
-        _ENABLE_WARP = _shared.ENABLE_WARP
-        _WARP_PROXY_URL = _shared.WARP_PROXY_URL
-        result = "Disconnected"
-        if _ENABLE_WARP and _WARP_PROXY_URL:
-            # Quick socket test to 127.0.0.1:1080 (no DNS, always fast)
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", 1080), timeout=3
-                )
-                writer.close()
-                result = "Connected"
-                # Try to fetch the WARP IP via the proxy
-                try:
-                    connector = get_connector_for_proxy(
-                        _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
-                    )
-                    async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
-                        async with session.get("https://api.ipify.org?format=json") as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                self._warp_ip = data.get("ip", "")
-                except Exception:
-                    pass
-            except (OSError, asyncio.TimeoutError):
-                pass
-        return result
+        healthy, _reason = await self._probe_warp(timeout_sec=10)
+        return "Connected" if healthy else "Disconnected"
 
     async def _run_warp_control(self, action: str) -> int:
         """Run the explicit userspace WARP control action."""
@@ -318,7 +380,7 @@ class HLSProxyCoreMixin:
         return await asyncio.wait_for(proc.wait(), timeout=20)
 
     async def reconnect_warp(self) -> dict:
-        """Manually restart wireproxy; automatic reconnect remains disabled."""
+        """Restart wireproxy and verify the WARP path after reconnect."""
         if not hasattr(self, "_warp_reconnect_lock"):
             self._warp_reconnect_lock = asyncio.Lock()
 
@@ -335,9 +397,13 @@ class HLSProxyCoreMixin:
                 rc = await self._run_warp_control("restart")
                 if rc != 0:
                     return {"status": "error", "message": "wireproxy restart failed"}
-                if await self.is_warp_healthy(timeout_sec=8):
+                healthy, reason = await self._probe_warp(timeout_sec=8)
+                if healthy:
                     return {"status": "ok", "message": "WARP userspace tunnel reconnected"}
-                return {"status": "error", "message": "wireproxy is up but WARP health check failed"}
+                return {
+                    "status": "error",
+                    "message": f"wireproxy restart completed but WARP probe failed: {reason}",
+                }
             except (FileNotFoundError, asyncio.TimeoutError) as exc:
                 return {"status": "error", "message": f"WARP reconnect failed: {exc}"}
 

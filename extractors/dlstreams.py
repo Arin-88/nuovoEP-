@@ -16,6 +16,7 @@ except ImportError:
 from config import (
     get_connector_for_proxy,
     get_preferred_proxy_for_url,
+    get_ordered_proxies_for_url,
 )
 import config as _cfg
 
@@ -47,6 +48,31 @@ class DLStreamsExtractor:
     def _origin_of(url: str) -> str:
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _route_diagnostic(self, url: str) -> str:
+        """Describe routing state without exposing proxy credentials."""
+        try:
+            ordered = get_ordered_proxies_for_url(
+                url,
+                "dlstreams",
+                self.proxies,
+                self.bypass_warp_active,
+            )
+            warp_url = getattr(_cfg, "WARP_PROXY_URL", "")
+            route_types = ["WARP" if proxy == warp_url else "proxy" for proxy in ordered]
+            route_summary = ",".join(route_types) or "none"
+        except Exception as exc:
+            route_summary = f"unavailable({type(exc).__name__})"
+
+        warp_enabled = bool(_cfg._get_dynamic_warp_enabled())
+        warp_excluded = bool(_cfg._is_warp_excluded(url or ""))
+        direct_allowed = _cfg.is_direct_connection_allowed(self.bypass_warp_active)
+        host = urlparse(url or "").netloc or "unknown"
+        return (
+            f"target={host} warp={'on' if warp_enabled else 'off'} "
+            f"warp_excluded={'yes' if warp_excluded else 'no'} "
+            f"candidates={route_summary} direct={'allowed' if direct_allowed else 'disabled'}"
+        )
 
     def _sync_entry_origin_from_url(self, url: str) -> None:
         parsed = urlparse(url)
@@ -202,8 +228,9 @@ class DLStreamsExtractor:
         target_url = url or self.stream_origin or self.entry_origin
         proxy_url = await get_preferred_proxy_for_url(target_url, "dlstreams", self.proxies, self.bypass_warp_active)
         if proxy_url is None and not _cfg.is_direct_connection_allowed(self.bypass_warp_active):
-            raise aiohttp.ClientConnectionError(
-                "DLStreams: direct fallback disabled; no proxy route available"
+            raise ExtractorError(
+                "DLStreams: no usable proxy route; direct fallback disabled "
+                f"[{self._route_diagnostic(target_url)}]"
             )
         
         # If we have an existing session, check if its proxy matches what we need now
@@ -269,13 +296,22 @@ class DLStreamsExtractor:
                     logger.info("DLStreams: Direct browser-less extraction succeeded for %s!", f"premium{channel_id}")
                     return direct_result
             except Exception as direct_exc:
-                logger.error("DLStreams: Direct browser-less extraction failed for %s: %s", f"premium{channel_id}", direct_exc)
+                logger.debug(
+                    "DLStreams: browser-less extraction failed for %s: %s",
+                    f"premium{channel_id}",
+                    direct_exc,
+                    exc_info=True,
+                )
 
             raise ExtractorError("Could not retrieve manifest via browser-less extraction (browser fallback is disabled).")
 
+        except asyncio.CancelledError:
+            raise
+        except ExtractorError:
+            raise
         except Exception as e:
-            logger.exception(f"DLStreams extraction failed for {url}")
-            raise ExtractorError(f"Extraction failed: {str(e)}")
+            logger.debug("DLStreams internal extraction error for %s: %s", url, e, exc_info=True)
+            raise ExtractorError(f"DLStreams extraction failed: {str(e)}") from None
 
     async def close(self):
         pending_tasks = list(self._inflight_extract_tasks.values())

@@ -1244,8 +1244,12 @@ class HLSProxyStreamingMixin:
                 )
             # Do not restart the kernel tunnel from a stream request.
             if active_proxy and getattr(_shared, 'WARP_PROXY_URL', None) and active_proxy == _shared.WARP_PROXY_URL:
-                if not await self.is_warp_healthy():
-                    logger.warning("WARP proxy confirmed unhealthy during stream failure; automatic reconnect is disabled")
+                warp_healthy, warp_reason = await self._probe_warp(timeout_sec=3)
+                if not warp_healthy:
+                    logger.warning(
+                        "WARP proxy confirmed unhealthy during stream failure; %s",
+                        warp_reason,
+                    )
                 else:
                     logger.debug("WARP proxy is healthy; stream failure was due to upstream source.")
             if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSL" in str(e) or "ssl" in str(e):
