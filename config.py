@@ -15,10 +15,12 @@ from config_store import (
     get_all as _cfg_get_all,
 )
 from aiohttp_socks import (
+    ProxyConnector,
     ProxyError as AioProxyError,
     ProxyConnectionError as AioProxyConnectionError,
     ProxyTimeoutError as AioProxyTimeoutError,
 )
+from aiohttp_socks.connector import Proxy as AiohttpSocksProxy, _ResponseHandler
 from python_socks import (
     ProxyError as PyProxyError,
     ProxyConnectionError as PyProxyConnectionError,
@@ -33,6 +35,86 @@ ALL_PROXY_ERRORS = (
     PyProxyConnectionError,
     PyProxyTimeoutError,
 )
+
+
+class _IPv4SniProxyConnector(ProxyConnector):
+    """SOCKS connector that sends an IPv4 destination but keeps TLS SNI."""
+
+    async def _wrap_create_connection(
+        self,
+        *args,
+        addr_infos,
+        req,
+        timeout,
+        client_error=None,
+        **kwargs,
+    ):
+        del args, req, client_error
+        try:
+            host = addr_infos[0][4][0]
+            port = addr_infos[0][4][1]
+        except IndexError as exc:
+            raise ValueError("Invalid arg: `addr_infos`") from exc
+
+        ssl_context = kwargs.get("ssl")
+        server_hostname = kwargs.get("server_hostname") or host
+        try:
+            return await self._connect_via_proxy_with_sni(
+                host=host,
+                port=port,
+                ssl_context=ssl_context,
+                server_hostname=server_hostname,
+                timeout=timeout.sock_connect,
+            )
+        except PyProxyConnectionError as exc:
+            raise AioProxyConnectionError(str(exc)) from exc
+        except PyProxyTimeoutError as exc:
+            raise AioProxyTimeoutError(str(exc)) from exc
+        except PyProxyError as exc:
+            raise AioProxyError(str(exc), error_code=exc.error_code) from exc
+
+    async def _connect_via_proxy_with_sni(
+        self,
+        host: str,
+        port: int,
+        ssl_context,
+        server_hostname: str,
+        timeout: float | None,
+    ):
+        proxy = AiohttpSocksProxy(
+            proxy_type=self._proxy_type,
+            host=self._proxy_host,
+            port=self._proxy_port,
+            username=self._proxy_username,
+            password=self._proxy_password,
+            rdns=self._rdns,
+            proxy_ssl=self._proxy_ssl,
+        )
+        stream = None
+        try:
+            # SOCKS receives the already-resolved IPv4 literal.
+            stream = await proxy.connect(
+                dest_host=host,
+                dest_port=port,
+                dest_ssl=None,
+                timeout=timeout,
+            )
+            if ssl_context is not None:
+                # TLS still uses the original hostname for certificate/SNI.
+                stream = await stream.start_tls(
+                    hostname=server_hostname,
+                    ssl_context=ssl_context,
+                )
+
+            transport = stream.writer.transport
+            protocol = _ResponseHandler(loop=self._loop, writer=stream.writer)
+            transport.set_protocol(protocol)
+            protocol.connection_made(transport)
+            return transport, protocol
+        except BaseException:
+            if stream is not None:
+                await stream.close()
+            raise
 
 
 APP_VERSION = "2.11.19"
@@ -774,15 +856,16 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     # extractor mantenga socket CDN idle dentro WireProxy. force_close=True
     # chiude il socket a fine response senza limitare concorrenza.
     if is_warp:
-        # WARP must never resolve/connect to an IPv6 origin.  aiohttp-socks
-        # normally uses NoResolver with socks5h; resolve locally as A-only so
-        # python-socks receives an IPv4 literal and cannot pick AAAA.
+        # WARP must never resolve/connect to an IPv6 origin. Resolve locally
+        # as A-only so the SOCKS request receives an IPv4 literal. The custom
+        # connector preserves the original hostname for TLS SNI/certificates.
         kwargs["family"] = socket.AF_INET
         rdns = False
         kwargs["force_close"] = True
         kwargs.pop("keepalive_timeout", None)
 
-    connector = ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
+    connector_class = _IPv4SniProxyConnector if is_warp else ProxyConnector
+    connector = connector_class.from_url(connector_url, rdns=rdns, **kwargs)
     if is_warp:
         from aiohttp.resolver import DefaultResolver
 
