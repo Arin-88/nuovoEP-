@@ -692,7 +692,9 @@ class SyncEngine:
         audio_fp = str(payload.get("audio_fingerprint") or metadata.get("source_fingerprint") or "")
         cache_key = self.offsets.key(media_key, resolution, video_fp, audio_fp)
         payload["cache_key"] = cache_key
-        lookup = await self.offsets.lookup({"cache_key": cache_key, "media_key": media_key, "resolution": resolution, "video_fingerprint": video_fp, "audio_fingerprint": audio_fp, "vpsAccess": payload.get("vpsAccess", "")})
+        lookup = None
+        if not payload.get("_offset_cache_checked"):
+            lookup = await self.offsets.lookup({"cache_key": cache_key, "media_key": media_key, "resolution": resolution, "video_fingerprint": video_fp, "audio_fingerprint": audio_fp, "vpsAccess": payload.get("vpsAccess", "")})
         if lookup:
             cached_details = lookup.get("details") or lookup
             cached_status = str(cached_details.get("status") or lookup.get("status") or "")
