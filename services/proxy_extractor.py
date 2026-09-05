@@ -17,6 +17,8 @@ from services.proxy_shared import (
 import config_store
 import asyncio
 import base64
+import gzip
+import re
 import urllib.parse
 import config as _config
 from yarl import URL
@@ -376,9 +378,46 @@ class HLSProxyExtractorHandlerMixin:
                 is_vavoo_req = check_vavoo_request(stream_headers, request, stream_url)
                 disable_ssl = request.query.get("disable_ssl") == "1" or force_disable_ssl or is_vavoo_req
 
+                # VidXgo already captured the best video variant during
+                # extraction. Return that media playlist directly instead of
+                # making iOS request a second, generic HLS relay URL.
+                manifest_content = captured_manifest
+                manifest_base_url = stream_url
+                if extractor_key == "vidxgo" and captured_manifests:
+                    captured_variants = []
+                    master_lines = captured_manifest.splitlines()
+                    for index, line in enumerate(master_lines[:-1]):
+                        if not line.startswith("#EXT-X-STREAM-INF:"):
+                            continue
+                        raw_url = master_lines[index + 1].strip()
+                        if not raw_url or raw_url.startswith("#"):
+                            continue
+                        variant_url = urllib.parse.urljoin(stream_url, raw_url)
+                        variant_text = captured_manifests.get(variant_url)
+                        if not variant_text or "#EXTM3U" not in variant_text:
+                            continue
+                        bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
+                        bandwidth = int(bandwidth_match.group(1)) if bandwidth_match else 0
+                        captured_variants.append((bandwidth, variant_url, variant_text))
+
+                    if captured_variants:
+                        _, manifest_base_url, manifest_content = max(
+                            captured_variants,
+                            key=lambda item: item[0],
+                        )
+                        logger.info(
+                            "VidXgo: returning captured best variant directly for iOS [%s]",
+                            request_log_context(
+                                request,
+                                manifest_base_url,
+                                route=safe_log_route(selected_proxy),
+                                extractor=extractor,
+                            ),
+                        )
+
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
-                    manifest_content=captured_manifest,
-                    base_url=stream_url,
+                    manifest_content=manifest_content,
+                    base_url=manifest_base_url,
                     proxy_base=proxy_base,
                     stream_headers=stream_headers,
                     original_channel_url=original_channel_url,
@@ -396,14 +435,19 @@ class HLSProxyExtractorHandlerMixin:
                     extractor_key=extractor_key,
                     stream_key=stream_key,
                 )
-                return web.Response(
-                    text=rewritten_manifest,
-                    headers={
-                        "Content-Type": "application/vnd.apple.mpegurl",
-                        "Access-Control-Allow-Origin": "*",
-                        "Cache-Control": "no-cache",
-                    },
-                )
+                response_headers = {
+                    "Content-Type": "application/vnd.apple.mpegurl",
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "no-cache",
+                }
+                if "gzip" in request.headers.get("Accept-Encoding", "").lower():
+                    response_headers["Content-Encoding"] = "gzip"
+                    response_headers["Vary"] = "Accept-Encoding"
+                    return web.Response(
+                        body=gzip.compress(rewritten_manifest.encode("utf-8"), mtime=0),
+                        headers=response_headers,
+                    )
+                return web.Response(text=rewritten_manifest, headers=response_headers)
 
             if redirect_stream and endpoint == "/proxy/mpd/manifest.m3u8":
                 proxy_query = {

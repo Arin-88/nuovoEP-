@@ -97,8 +97,11 @@ def should_use_short_manifest_urls(original_url: str, host_param: str, response_
     response = (response_url or "").lower()
     return (
         "cinemacity.cc" in original
+        or "vidxgo" in original
         or host in {"city", "cinemacity"}
+        or host == "vidxgo"
         or SPECIAL_CDN_DOMAIN in response
+        or "d2b.you" in response
     )
 
 
