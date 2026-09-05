@@ -194,12 +194,10 @@ class EmbedStExtractor(BaseExtractor):
                 "EmbedSt: direct fallback disabled; no proxy route available"
             )
         request_kwargs = {}
-        curl_options = None
         if proxy:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
-            curl_options = _cfg.get_curl_ipv4_options(proxy).get("curl_options")
         try:
-            s = await self._get_curl_session(curl_options)
+            s = await self._get_curl_session()
             resp = await s.get(
                 url,
                 headers=headers,

@@ -31,17 +31,6 @@ start_userspace_warp() {
     rm -f wgcf-profile.conf
     wgcf generate || return 1
 
-    # WARP is deliberately IPv4-only. Remove IPv6 from the tunnel address,
-    # DNS list, and routes so wireproxy's native HTTP listener cannot select
-    # an unreachable IPv6 destination for browser traffic.
-    sed -i -E '/^[[:space:]]*AllowedIPs[[:space:]]*=/ s/,[[:space:]]*::\/0//g' wgcf-profile.conf
-    sed -i -E '/^[[:space:]]*Address[[:space:]]*=/ s/,[[:space:]]*[0-9A-Fa-f:]+\/128//g' wgcf-profile.conf
-    sed -i -E '/^[[:space:]]*DNS[[:space:]]*=/ s/,[[:space:]]*[0-9A-Fa-f:]*:[0-9A-Fa-f:]+//g' wgcf-profile.conf
-    if grep -Eq '^[[:space:]]*(Address|DNS|AllowedIPs)[[:space:]]*=.*:' wgcf-profile.conf; then
-        echo "Could not create IPv4-only WARP profile (IPv6 setting remains)." >&2
-        return 1
-    fi
-
     install -m 600 wgcf-profile.conf /etc/wireguard/wg0.conf
 
     "$WARPCTL" start || return 1

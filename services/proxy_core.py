@@ -1,7 +1,6 @@
 import asyncio
 import gc
 import hmac
-import ipaddress
 import logging
 import os
 import re
@@ -286,7 +285,7 @@ class HLSProxyCoreMixin:
 
         try:
             connector = get_connector_for_proxy(
-                _WARP_PROXY_URL, limit=0, family=socket.AF_INET, health_check=True
+                _WARP_PROXY_URL, limit=0, health_check=True
             )
             timeout = ClientTimeout(total=timeout_sec)
             async with ClientSession(connector=connector, timeout=timeout) as session:
@@ -310,18 +309,7 @@ class HLSProxyCoreMixin:
                     f"warp={warp_state or 'unknown'}"
                 )
 
-            warp_ip = trace.get("ip", "")
-            try:
-                ip_version = ipaddress.ip_address(warp_ip).version
-            except ValueError:
-                ip_version = None
-            if ip_version != 4:
-                return False, (
-                    f"component=warp_tunnel process={process_state} socks=up "
-                    f"warp={warp_state} egress=ipv6-or-unknown ip={warp_ip or 'unknown'}"
-                )
-
-            self._warp_ip = warp_ip
+            self._warp_ip = trace.get("ip", "")
             return True, (
                 f"process={process_state} socks=up warp={warp_state} "
                 f"ip={self._warp_ip or 'unknown'}"
@@ -602,9 +590,6 @@ class HLSProxyCoreMixin:
                 "enable_cleanup_closed": True,
                 "use_dns_cache": True,
             }
-            if not prefer_default_family:
-                connector_kwargs["family"] = socket.AF_INET
-
             connector = TCPConnector(**connector_kwargs)
             session = aiohttp.ClientSession(
                 timeout=ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=30),
@@ -729,7 +714,6 @@ class HLSProxyCoreMixin:
                     connector_kwargs = {
                         "limit": 0,
                         "limit_per_host": 0,
-                        "family": socket.AF_INET,
                     }
                     if _shared.WARP_PROXY_URL and proxy == _shared.WARP_PROXY_URL:
                         # Reuse short-lived upstream connections during HLS
@@ -793,7 +777,6 @@ class HLSProxyCoreMixin:
                 limit=0,
                 limit_per_host=0,
                 keepalive_timeout=15,
-                family=socket.AF_INET,
                 rdns=True,
             )
             timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=None)
