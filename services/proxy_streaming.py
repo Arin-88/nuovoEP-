@@ -6,6 +6,7 @@ import time
 import urllib.parse
 import aiohttp
 import config_store
+import config as _config
 from config import PROXY_SOURCE_LIST, find_first_alive_async, is_proxy_alive
 import services.proxy_shared as _shared
 from services.proxy_shared import (
@@ -51,6 +52,19 @@ _PREFETCH_TTL = 6.0
 
 
 class HLSProxyStreamingMixin:
+
+    @staticmethod
+    def _discard_disabled_warp_route(proxy_url, bypass_warp):
+        """Drop WARP carried by an old relay URL after its policy changed."""
+        if proxy_url and _config.is_warp_proxy_url(proxy_url) and (
+            bypass_warp or not _config._get_dynamic_warp_enabled()
+        ):
+            logger.debug(
+                "Ignoring stale WARP route %s (WARP bypassed/disabled)",
+                proxy_url,
+            )
+            return None
+        return proxy_url
 
     # Pre-compiled regex for segment URL parsing
     _SEGMENT_URL_PATTERN = re.compile(r"([-_])(\d+)(\.[^.]+)$")
@@ -511,6 +525,9 @@ class HLSProxyStreamingMixin:
                 forced_proxy = None
                 _shared.BYPASS_PROXIES_CONTEXT.set(True)
                 logger.debug(f"🔍 [Segment-DEBUG] proxy=off detected, BYPASS_PROXIES_CONTEXT=True, bypass_warp={bypass_warp}")
+            forced_proxy = self._discard_disabled_warp_route(
+                forced_proxy, bypass_warp
+            )
 
             current_proxy = forced_proxy
             attempts = 2 if forced_proxy else 1
@@ -668,6 +685,9 @@ class HLSProxyStreamingMixin:
             None
             if force_direct or bypass_proxies
             else (forced_proxy or request.query.get("proxy") or None)
+        )
+        forced_proxy = self._discard_disabled_warp_route(
+            forced_proxy, bypass_warp
         )
         request._ps_forced_proxy = forced_proxy
         session = None
@@ -1672,6 +1692,9 @@ class HLSProxyStreamingMixin:
             if forced_proxy and forced_proxy.lower() == "off":
                 forced_proxy = None
                 _shared.BYPASS_PROXIES_CONTEXT.set(True)
+            forced_proxy = self._discard_disabled_warp_route(
+                forced_proxy, bypass_warp
+            )
             logger.debug(f"🔍 [Decrypt-DEBUG] bypass_warp={bypass_warp}, forced_proxy={forced_proxy}, warp_param='{request.query.get('warp', 'NOT_FOUND')}'")
             proxy_from_config = get_proxy_for_url(url or init_url, bypass_warp=bypass_warp)
             logger.debug(f"🔍 [Decrypt-DEBUG] get_proxy_for_url returned: {proxy_from_config}")

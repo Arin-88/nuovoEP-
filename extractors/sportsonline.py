@@ -212,7 +212,15 @@ class SportsonlineExtractor:
                     return html, str(response.url)
 
             except (ssl.SSLError, ClientOSError) as e:
-                logger.warning(f"SSL/OS error attempt {attempt + 1} for {url}: {str(e)}")
+                logger.warning(
+                    "SSL/OS error attempt %s/%s for %s via %s: %s: %r",
+                    attempt + 1,
+                    retries,
+                    url,
+                    self._session_proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
                 if self._session_proxy:
                     logger.info(f"SSL/OS error with proxy {self._session_proxy}, retrying without direct fallback...")
                     if self.session and not self.session.closed:
@@ -225,7 +233,15 @@ class SportsonlineExtractor:
                     raise ExtractorError(f"All request attempts failed for {url}: {str(e)}")
 
             except Exception as e:
-                logger.warning(f"Request attempt {attempt + 1} failed for {url}: {str(e)}")
+                logger.warning(
+                    "Request attempt %s/%s failed for %s via %s: %s: %r",
+                    attempt + 1,
+                    retries,
+                    url,
+                    self._session_proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
                 if attempt < retries - 1:
                     await asyncio.sleep(initial_delay)
                 else:

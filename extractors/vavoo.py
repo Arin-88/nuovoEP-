@@ -194,7 +194,13 @@ class VavooExtractor:
                     else:
                         logger.warning(f"Vavoo ping {url}: status {resp.status}")
             except Exception as e:
-                logger.warning(f"Vavoo ping {url} failed: {e}")
+                logger.warning(
+                    "Vavoo ping %s failed via %s: %s: %r",
+                    url,
+                    self._proxy or "direct",
+                    type(e).__name__,
+                    e,
+                )
         return None
 
     async def _get_sig(self, force: bool = False) -> Optional[str]:

@@ -49,15 +49,32 @@ class _IPv4SniProxyConnector(ProxyConnector):
         client_error=None,
         **kwargs,
     ):
-        del args, req, client_error
+        del args, client_error
         try:
             host = addr_infos[0][4][0]
             port = addr_infos[0][4][1]
-        except IndexError as exc:
+        except (IndexError, TypeError) as exc:
             raise ValueError("Invalid arg: `addr_infos`") from exc
 
         ssl_context = kwargs.get("ssl")
-        server_hostname = kwargs.get("server_hostname") or host
+        # aiohttp resolves the URL before calling this method. Therefore
+        # ``host`` is normally an IPv4 literal, but TLS still needs the
+        # original hostname for SNI/certificate validation. Older versions
+        # of aiohttp did not always pass ``server_hostname`` in kwargs, so
+        # recover it from the request URL as a safe fallback.
+        request_url = getattr(req, "url", None)
+        request_hostname = (
+            getattr(request_url, "raw_host", None)
+            or getattr(request_url, "host", None)
+            or ""
+        )
+        server_hostname = (
+            request_hostname
+            or kwargs.get("server_hostname")
+            or host
+        )
+        if server_hostname.startswith("[") and server_hostname.endswith("]"):
+            server_hostname = server_hostname[1:-1]
         try:
             return await self._connect_via_proxy_with_sni(
                 host=host,
@@ -117,7 +134,7 @@ class _IPv4SniProxyConnector(ProxyConnector):
             raise
 
 
-APP_VERSION = "2.11.21"
+APP_VERSION = "2.11.22"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -529,7 +546,10 @@ def get_ordered_proxies_for_url(
     if (
         selected_proxy
         and selected_proxy_is_strict
-        and not (bypass_warp and selected_proxy == _WARP_PROXY_URL)
+        and not (
+            is_warp_proxy_url(selected_proxy)
+            and (bypass_warp or not _ENABLE_WARP)
+        )
     ):
         return build([selected_proxy], strict=True)
 
@@ -852,17 +872,18 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     elif connector_url.startswith("socks4://"):
         rdns = False
 
-    # WARP tunnel resta vivo; connessioni upstream no. Evita che ogni
-    # extractor mantenga socket CDN idle dentro WireProxy. force_close=True
-    # chiude il socket a fine response senza limitare concorrenza.
+    # Keep upstream connections reusable. Reopening a SOCKS+TLS connection
+    # for every playlist/segment overloads userspace WireProxy and causes
+    # avoidable timeouts/buffering. The caller still controls pool limits and
+    # idle cleanup.
     if is_warp:
         # WARP must never resolve/connect to an IPv6 origin. Resolve locally
         # as A-only so the SOCKS request receives an IPv4 literal. The custom
         # connector preserves the original hostname for TLS SNI/certificates.
         kwargs["family"] = socket.AF_INET
         rdns = False
-        kwargs["force_close"] = True
-        kwargs.pop("keepalive_timeout", None)
+        kwargs.setdefault("keepalive_timeout", 15)
+        kwargs.setdefault("force_close", False)
 
     connector_class = _IPv4SniProxyConnector if is_warp else ProxyConnector
     connector = connector_class.from_url(connector_url, rdns=rdns, **kwargs)

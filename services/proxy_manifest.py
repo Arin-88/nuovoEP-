@@ -3,6 +3,7 @@ import hashlib
 import time
 import urllib.parse
 import aiohttp
+import config as _config
 import services.proxy_shared as _shared
 from services.proxy_shared import (
     logger,
@@ -85,6 +86,14 @@ class HLSProxyManifestHandlerMixin:
             selected_proxy = urllib.parse.unquote(raw_proxy)
             if "://" not in selected_proxy and "%3a" in selected_proxy.lower():
                 selected_proxy = urllib.parse.unquote(selected_proxy)
+        if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
+            bypass_warp or not _config._get_dynamic_warp_enabled()
+        ):
+            logger.debug(
+                "Ignoring stale WARP proxy from relay URL: %s",
+                selected_proxy,
+            )
+            selected_proxy = None
         proxy_token = SELECTED_PROXY_CONTEXT.set(selected_proxy)
         strict_proxy_token = STRICT_PROXY_CONTEXT.set(bool(selected_proxy))
         force_direct = self._should_force_direct_from_query(request)
@@ -267,6 +276,14 @@ class HLSProxyManifestHandlerMixin:
                     if bypass_warp and _shared.WARP_PROXY_URL and selected_proxy == _shared.WARP_PROXY_URL:
                         logger.debug(
                             "Ignoring stale WARP _session_proxy from extractor because bypass_warp=True"
+                        )
+                        selected_proxy = None
+                    if selected_proxy and _config.is_warp_proxy_url(selected_proxy) and (
+                        bypass_warp or not _config._get_dynamic_warp_enabled()
+                    ):
+                        logger.debug(
+                            "Ignoring stale WARP route after policy reload: %s",
+                            selected_proxy,
                         )
                         selected_proxy = None
 
