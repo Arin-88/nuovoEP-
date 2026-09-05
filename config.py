@@ -182,7 +182,9 @@ LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_STR, logging.WARNING)
 PROXY_TEST_TIMEOUT = 10
 cpu_cores = os.cpu_count() or 4
 PROXY_TEST_CONCURRENCY = 10 if cpu_cores == 1 else min(100, max(30, cpu_cores * 15))
-WARP_PROXY_URL = "socks5h://127.0.0.1:1080"
+# Resolve WARP destinations locally as IPv4-only. socks5h would delegate DNS
+# to wireproxy, where an AAAA result could stall before the IPv4 route is tried.
+WARP_PROXY_URL = "socks5://127.0.0.1:1080"
 # Monotonic timestamp of the last real WARP connector use. Health probes do
 # not update it; EasyProxy uses it to recycle WireProxy only after true idle.
 WARP_LAST_ACTIVITY = 0.0
