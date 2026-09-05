@@ -211,7 +211,11 @@ class HLSProxyDashMixin:
                         )
                 except Exception as browser_key_exc:
                     logger.warning(
-                        f"Browser-backed key fetch failed, falling back to direct request: {browser_key_exc}"
+                        "Browser-backed key fetch failed, falling back to direct request: %s "
+                        "[extractor=%s source=%s]",
+                        browser_key_exc,
+                        request.query.get("extractor_key") or "unknown",
+                        _safe_endpoint(original_channel_url),
                     )
 
 
@@ -227,8 +231,7 @@ class HLSProxyDashMixin:
                         continue
                     headers[header_name] = param_value
 
-            logger.debug(f"🔐 Fetching AES key from: {key_url}")
-            logger.debug(f"   -> with headers: {headers}")
+            logger.debug(f"🔐 Fetching AES key from: {_safe_endpoint(key_url)}")
 
             # ✅ Use pooled session for better performance
             proxy_used = None
@@ -252,7 +255,11 @@ class HLSProxyDashMixin:
                 )
                 session_need_close = proxy_used is not None
                 if proxy_used:
-                    logger.info(f"🔐 [Key Proxy] Routing through: {proxy_used}")
+                    logger.info(
+                        "🔐 [Key Proxy] Routing through: %s [%s]",
+                        _safe_route(proxy_used),
+                        self._key_context(request, key_url, proxy_used, forced_proxy, bypass_warp),
+                    )
                 elif (
                     forced_proxy
                     or _GLOBAL_PROXIES
@@ -263,9 +270,15 @@ class HLSProxyDashMixin:
                         for route in _TRANSPORT_ROUTES
                     )
                 ):
-                    logger.warning(f"🔐 [Key Proxy] NO PROXY assigned for: {key_url}")
+                    logger.warning(
+                        "🔐 [Key Proxy] NO PROXY assigned [%s]",
+                        self._key_context(request, key_url, proxy_used, forced_proxy, bypass_warp),
+                    )
                 else:
-                    logger.info(f"🔐 [Key Proxy] Using direct session for: {key_url}")
+                    logger.info(
+                        "🔐 [Key Proxy] Using direct session [%s]",
+                        self._key_context(request, key_url, proxy_used, forced_proxy, bypass_warp),
+                    )
 
             secret_key = headers.pop("X-Secret-Key", None)
 
@@ -290,7 +303,10 @@ class HLSProxyDashMixin:
                         f"🔐 Computed key headers: ts={ts}, nonce={nonce}, fingerprint={fingerprint}, key_path={key_path}"
                     )
                 else:
-                    logger.warning(f"⚠️ Could not compute key headers for {key_url}")
+                        logger.warning(
+                            "⚠️ Could not compute key headers [%s]",
+                            self._key_context(request, key_url, proxy_used, forced_proxy, bypass_warp),
+                        )
 
             # Caso 'auth' - URL che contengono 'auth' richiedono headers speciali
             if "auth" in key_url.lower():
@@ -371,7 +387,11 @@ class HLSProxyDashMixin:
                                                 },
                                             )
                                 except Exception as fallback_e:
-                                    logger.error(f"❌ Key fetch fallback via rotated proxy {new_proxy} failed: {fallback_e}")
+                                    logger.error(
+                                        "❌ Key fetch fallback via rotated proxy failed: %s (%s)",
+                                        fallback_e,
+                                        key_context,
+                                    )
                                 finally:
                                     if fallback_session and not fallback_session.closed:
                                         await fallback_session.close()
@@ -459,7 +479,11 @@ class HLSProxyDashMixin:
                                         },
                                     )
                         except Exception as fallback_err:
-                            logger.error(f"❌ Key fetch fallback via rotated proxy {new_proxy} failed: {fallback_err}")
+                            logger.error(
+                                "❌ Key fetch fallback via rotated proxy failed: %s (%s)",
+                                fallback_err,
+                                key_context,
+                            )
                         finally:
                             if fallback_session and not fallback_session.closed:
                                 await fallback_session.close()
@@ -487,7 +511,11 @@ class HLSProxyDashMixin:
                 raise e
 
         except Exception as e:
-            logger.error(f"❌ Error fetching AES key: {str(e)}")
+            logger.error(
+                "❌ Error fetching AES key: %s (%s)",
+                e,
+                self._key_context(request, key_url, proxy_used, forced_proxy, bypass_warp),
+            )
             return web.Response(text=f"Key error: {str(e)}", status=500)
         finally:
             if session_need_close and session and not session.closed:

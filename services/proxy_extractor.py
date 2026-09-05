@@ -11,6 +11,8 @@ from services.proxy_shared import (
     ManifestRewriter,
     get_public_base_url,
     get_extractor_routing_overrides,
+    request_log_context,
+    safe_log_route,
 )
 import config_store
 import asyncio
@@ -475,7 +477,16 @@ class HLSProxyExtractorHandlerMixin:
                 "query_params": q_params,
             }
 
-            logger.info(f"✅ Extractor OK: {url} -> {stream_url[:50]}...")
+            logger.info(
+                "✅ Extractor OK: %s [%s]",
+                request_log_context(
+                    request,
+                    stream_url,
+                    route=safe_log_route(selected_proxy),
+                    extractor=extractor,
+                ),
+                stream_url[:50],
+            )
             return web.json_response(response_data)
 
         except Exception as e:
@@ -500,13 +511,27 @@ class HLSProxyExtractorHandlerMixin:
             ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)) or type(e).__name__ == "ExtractorError"  # ponytail: expected extractor failures shouldn't print a traceback
 
             error_desc = str(e) or type(e).__name__
+            error_context = request_log_context(
+                request,
+                url,
+                route=safe_log_route(selected_proxy),
+                extractor=extractor,
+            )
             if isinstance(e, asyncio.CancelledError):
-                logger.info("Extractor request cancelled (client disconnected)")
+                logger.info("Extractor request cancelled (client disconnected) [%s]", error_context)
                 raise
             if is_expected_error:
-                logger.warning(f"⚠️ Extractor request failed (expected error) [{url}]: {error_desc}")
+                logger.warning(
+                    "⚠️ Extractor request failed (expected error): %s [%s]",
+                    error_desc,
+                    error_context,
+                )
             else:
-                logger.error(f"❌ Error in extractor request [{url}]: {error_desc}")
+                logger.error(
+                    "❌ Error in extractor request: %s [%s]",
+                    error_desc,
+                    error_context,
+                )
                 import traceback
                 traceback.print_exc()
 
