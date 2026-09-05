@@ -30,11 +30,35 @@ from services.proxy_shared import (
     get_extractor_routing_overrides,
 )
 
-HLS_MEDIA_PLAYLIST_CACHE_TTL = 2.0
 HLS_MEDIA_PLAYLIST_CACHE_MAX = 64
+HLS_MEDIA_PLAYLIST_CACHE_MIN_TTL = 0.5
+HLS_MEDIA_PLAYLIST_CACHE_MAX_TTL = 2.0
+HLS_VOD_PLAYLIST_CACHE_TTL = 30.0
 
 
 class HLSProxyManifestHandlerMixin:
+
+    @staticmethod
+    def _get_media_playlist_cache_ttl(playlist: str) -> float:
+        """Choose a short cache TTL from the generated playlist cadence."""
+        if "#EXT-X-ENDLIST" in playlist:
+            return HLS_VOD_PLAYLIST_CACHE_TTL
+
+        target_duration = None
+        for line in playlist.splitlines():
+            if line.startswith("#EXT-X-TARGETDURATION:"):
+                try:
+                    target_duration = float(line.split(":", 1)[1].strip())
+                except (TypeError, ValueError):
+                    target_duration = None
+                break
+
+        if target_duration is None or target_duration <= 0:
+            return HLS_MEDIA_PLAYLIST_CACHE_MIN_TTL
+        return min(
+            HLS_MEDIA_PLAYLIST_CACHE_MAX_TTL,
+            max(HLS_MEDIA_PLAYLIST_CACHE_MIN_TTL, target_duration / 2),
+        )
 
     async def handle_proxy_request(self, request):
         """Gestisce le richieste proxy principali"""
@@ -619,8 +643,9 @@ class HLSProxyManifestHandlerMixin:
                         playlist_cache = {}
                         self._hls_playlist_cache = playlist_cache
                     now = time.monotonic()
+                    playlist_cache_ttl = self._get_media_playlist_cache_ttl(hls_content)
                     playlist_cache[playlist_cache_key] = (
-                        now + HLS_MEDIA_PLAYLIST_CACHE_TTL,
+                        now + playlist_cache_ttl,
                         now,
                         hls_content,
                     )
@@ -632,7 +657,7 @@ class HLSProxyManifestHandlerMixin:
                     logger.debug(
                         "[HLS cache] stored: rep_id=%s ttl=%.1fs entries=%d",
                         rep_id,
-                        HLS_MEDIA_PLAYLIST_CACHE_TTL,
+                        playlist_cache_ttl,
                         len(playlist_cache),
                     )
 
