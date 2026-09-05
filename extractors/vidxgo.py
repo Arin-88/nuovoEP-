@@ -11,6 +11,7 @@ import logging
 import re
 from urllib.parse import urlparse, parse_qs, unquote
 
+import config as _cfg
 from config import get_ordered_proxies_for_url, should_allow_direct_fallback
 
 logger = logging.getLogger(__name__)
@@ -108,8 +109,10 @@ class VidXgoExtractor:
     @staticmethod
     def _normalize_proxy_url(proxy_value: str) -> str:
         proxy_value = unquote(proxy_value).strip()
+        # WARP is local-DNS SOCKS5. Do not turn it into socks5h: wireproxy
+        # remote DNS is the source of the observed timeout.
         if proxy_value.startswith("socks5://"):
-            return proxy_value.replace("socks5://", "socks5h://", 1)
+            return proxy_value
         if proxy_value.startswith("socks4a://"):
             return proxy_value.replace("socks4a://", "socks4://", 1)
         return proxy_value

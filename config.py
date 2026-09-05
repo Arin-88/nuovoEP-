@@ -515,11 +515,11 @@ def get_ordered_proxies_for_url(
 
     _ENABLE_WARP = _get_dynamic_warp_enabled()
     _WARP_PROXY_URL = WARP_PROXY_URL
+    if bypass_warp is None:
+        bypass_warp = BYPASS_WARP_CONTEXT.get()
     
     if bypass_proxies:
         ordered = []
-        if bypass_warp is None:
-            bypass_warp = BYPASS_WARP_CONTEXT.get()
         is_excluded = _is_warp_excluded(url or "")
         if _ENABLE_WARP and not bypass_warp and not is_excluded:
             ordered.append(_WARP_PROXY_URL)
@@ -558,29 +558,37 @@ def get_ordered_proxies_for_url(
         for route in _TRANSPORT_ROUTES:
             url_pattern = route["url"].lower()
             if url_pattern in normalized_url:
-                add(route.get("proxy"))
+                route_proxy = route.get("proxy")
+                if not (
+                    is_warp_proxy_url(route_proxy)
+                    and (bypass_warp or not _ENABLE_WARP)
+                ):
+                    add(route_proxy)
                 break
 
     extractor_proxies = get_extractor_proxies(extractor_name or "")
     for proxy in extractor_proxies:
-        if proxy != _WARP_PROXY_URL:
+        if not is_warp_proxy_url(proxy):
             add(proxy)
 
-    if selected_proxy and selected_proxy != _WARP_PROXY_URL:
+    if selected_proxy and not is_warp_proxy_url(selected_proxy):
         add(selected_proxy)
 
     for proxy in fallback_proxies or []:
-        if proxy != _WARP_PROXY_URL:
+        if not is_warp_proxy_url(proxy):
             add(proxy)
 
     for proxy in _GLOBAL_PROXIES:
-        if proxy != _WARP_PROXY_URL:
+        if not is_warp_proxy_url(proxy):
             add(proxy)
 
-    if bypass_warp is None:
-        bypass_warp = BYPASS_WARP_CONTEXT.get()
     is_excluded = _is_warp_excluded(url or "")
-    if _ENABLE_WARP and not bypass_warp and not is_excluded:
+    if (
+        _ENABLE_WARP
+        and not bypass_warp
+        and not is_excluded
+        and not any(is_warp_proxy_url(proxy) for proxy in ordered)
+    ):
         add(_WARP_PROXY_URL)
 
     return ProxyList(ordered, strict=False)
@@ -737,7 +745,7 @@ def mark_proxy_dead(proxy_url: str, dead_duration: int = 300):
         return
 
     _WARP_PROXY_URL = WARP_PROXY_URL
-    if _WARP_PROXY_URL and proxy_url == _WARP_PROXY_URL:
+    if _WARP_PROXY_URL and is_warp_proxy_url(proxy_url):
         logging.warning("WARP proxy %s failure observed; keeping it managed by socket health checks.", proxy_url)
         return
 

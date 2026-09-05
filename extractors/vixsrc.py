@@ -117,8 +117,11 @@ class VixSrcExtractor:
     def _normalize_proxy_url(proxy_value: str) -> str:
         proxy_value = unquote(proxy_value)
         proxy_value = proxy_value.strip()
+        # Keep socks5 local-DNS semantics. In particular WARP must not become
+        # socks5h: wireproxy remote DNS can stall on AAAA lookups, while the
+        # IPv4 WARP connector already resolves the destination locally.
         if proxy_value.startswith("socks5://"):
-            return proxy_value.replace("socks5://", "socks5h://", 1)
+            return proxy_value
         if proxy_value.startswith("socks4://") or proxy_value.startswith("socks4a://"):
             return proxy_value
         if "://" not in proxy_value:

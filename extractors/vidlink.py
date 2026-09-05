@@ -121,8 +121,10 @@ class VidLinkExtractor:
 
     @staticmethod
     def _normalize_proxy_url(proxy_url: str) -> str:
+        # Preserve local-DNS SOCKS5. This is required for the IPv4-only WARP
+        # endpoint; socks5h delegates DNS to wireproxy and can hang on AAAA.
         if proxy_url.startswith("socks5://"):
-            return proxy_url.replace("socks5://", "socks5h://", 1)
+            return proxy_url
         if "://" not in proxy_url:
             return f"socks5h://{proxy_url}"
         return proxy_url
