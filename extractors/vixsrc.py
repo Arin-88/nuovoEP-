@@ -588,23 +588,11 @@ class VixSrcExtractor:
         )
 
     @staticmethod
-    def _raise_if_embed_expired(url: str):
-        parsed = urlparse(url)
-        if "/embed/" not in parsed.path:
-            return
-        expires = parse_qs(parsed.query).get("expires", [None])[0]
-        if not expires:
-            return
-        try:
-            expires_ts = int(expires)
-        except (TypeError, ValueError):
-            return
-        now_ts = int(time.time())
-        if expires_ts <= now_ts:
-            raise ExtractorError(
-                f"Expired VixSrc embed URL (expired at {expires_ts}, current {now_ts}). "
-                "Use the original /movie/ or /tv/ URL to refresh tokens."
-            )
+    def _is_timeout_like(error: BaseException) -> bool:
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        message = str(error).lower()
+        return any(marker in message for marker in ("curl: (28)", "timed out", "timeout"))
 
     async def _get_session(self, url: str = None, forced_proxy: str | None = None):
         """Ottiene una sessione HTTP persistente."""
@@ -869,6 +857,8 @@ class VixSrcExtractor:
             # 404 means content not found — FS won't help, skip cascading fallbacks
             if "404" in str(curl_err):
                 raise ExtractorError(f"VixSrc API endpoint not found (404): {api_url}")
+            if self._is_timeout_like(curl_err):
+                raise ExtractorError(f"VixSrc API request timed out via the selected route: {api_url}") from curl_err
             logger.warning("curl_cffi failed for API, trying robust: %s", curl_err)
             try:
                 response = await self._make_robust_request(api_url, headers=api_headers, forced_proxy=None)
@@ -1084,8 +1074,6 @@ class VixSrcExtractor:
                 }
 
             if "/embed/" in parsed_url.path:
-                if not resolved_streamingcommunity:
-                    self._raise_if_embed_expired(url)
                 vix_url = url
                 try:
                     response = await self._make_curl_request(
@@ -1135,15 +1123,41 @@ class VixSrcExtractor:
                     except CloudflareChallengeError:
                         raise
                     except Exception as curl_err:
-                        logger.warning("curl_cffi failed for embed %s, trying robust: %s", embed_url, curl_err)
-                        try:
-                            response = await self._make_robust_request(
-                                embed_url,
-                                headers=self._fresh_headers(referer=url),
-                                forced_proxy=embed_proxy,
+                        error_text = str(curl_err).lower()
+                        if self._is_timeout_like(curl_err):
+                            # Do not send the same short-lived embed URL through
+                            # the aiohttp fallback after a WARP timeout. That
+                            # only adds latency and commonly turns into 410.
+                            raise ExtractorError(
+                                f"VixSrc embed request timed out via {embed_proxy or 'direct'}: {embed_url}"
+                            ) from curl_err
+                        if "410" in error_text or "gone" in error_text:
+                            refreshed_embed_url = await self._resolve_embed_url_from_api(
+                                url,
+                                forced_proxy=forced_proxy,
                             )
-                        except Exception as robust_err:
-                            raise ExtractorError(f"VixSrc embed fetch failed: {robust_err}") from robust_err
+                            if refreshed_embed_url and refreshed_embed_url != embed_url:
+                                logger.info("VixSrc embed token expired during fetch; retrying with a fresh API URL")
+                                embed_url = refreshed_embed_url
+                                response = await self._make_curl_request(
+                                    embed_url,
+                                    headers=self._fresh_headers(referer=url),
+                                    forced_proxy=forced_proxy or self.last_used_proxy,
+                                )
+                            else:
+                                raise ExtractorError(
+                                    f"VixSrc embed token expired and could not be refreshed: {embed_url}"
+                                ) from curl_err
+                        else:
+                            logger.warning("curl_cffi failed for embed %s, trying robust: %s", embed_url, curl_err)
+                            try:
+                                response = await self._make_robust_request(
+                                    embed_url,
+                                    headers=self._fresh_headers(referer=url),
+                                    forced_proxy=embed_proxy,
+                                )
+                            except Exception as robust_err:
+                                raise ExtractorError(f"VixSrc embed fetch failed: {robust_err}") from robust_err
                 else:
                     try:
                         response = await self._make_curl_request(url, forced_proxy=forced_proxy)

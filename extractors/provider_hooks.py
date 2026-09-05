@@ -10,7 +10,15 @@ DYNAMIC_WARP_BYPASS_DOMAINS = (
     "strem.fun",
     "torrentio.strem.fun",
 )
-PROTECTED_CURL_DOMAINS = ("cinemacity.cc", "torrentio", "strem.fun", "strmd.st")
+PROTECTED_CURL_DOMAINS = (
+    "cinemacity.cc",
+    "torrentio",
+    "strem.fun",
+    "strmd.st",
+    # VidXgo CDN playlists/segments are served from *.d2b.you and are
+    # noticeably slower through the generic aiohttp path.
+    "d2b.you",
+)
 MANIFEST_ONLY_CURL_DOMAINS = ("torrentio", "strem.fun")
 
 
@@ -89,8 +97,11 @@ def should_use_short_manifest_urls(original_url: str, host_param: str, response_
     response = (response_url or "").lower()
     return (
         "cinemacity.cc" in original
+        or "vidxgo" in original
         or host in {"city", "cinemacity"}
+        or host == "vidxgo"
         or SPECIAL_CDN_DOMAIN in response
+        or "d2b.you" in response
     )
 
 

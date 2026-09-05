@@ -11,10 +11,14 @@ from services.proxy_shared import (
     ManifestRewriter,
     get_public_base_url,
     get_extractor_routing_overrides,
+    request_log_context,
+    safe_log_route,
 )
 import config_store
 import asyncio
 import base64
+import gzip
+import re
 import urllib.parse
 import config as _config
 from yarl import URL
@@ -374,9 +378,46 @@ class HLSProxyExtractorHandlerMixin:
                 is_vavoo_req = check_vavoo_request(stream_headers, request, stream_url)
                 disable_ssl = request.query.get("disable_ssl") == "1" or force_disable_ssl or is_vavoo_req
 
+                # VidXgo already captured the best video variant during
+                # extraction. Return that media playlist directly instead of
+                # making iOS request a second, generic HLS relay URL.
+                manifest_content = captured_manifest
+                manifest_base_url = stream_url
+                if extractor_key == "vidxgo" and captured_manifests:
+                    captured_variants = []
+                    master_lines = captured_manifest.splitlines()
+                    for index, line in enumerate(master_lines[:-1]):
+                        if not line.startswith("#EXT-X-STREAM-INF:"):
+                            continue
+                        raw_url = master_lines[index + 1].strip()
+                        if not raw_url or raw_url.startswith("#"):
+                            continue
+                        variant_url = urllib.parse.urljoin(stream_url, raw_url)
+                        variant_text = captured_manifests.get(variant_url)
+                        if not variant_text or "#EXTM3U" not in variant_text:
+                            continue
+                        bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
+                        bandwidth = int(bandwidth_match.group(1)) if bandwidth_match else 0
+                        captured_variants.append((bandwidth, variant_url, variant_text))
+
+                    if captured_variants:
+                        _, manifest_base_url, manifest_content = max(
+                            captured_variants,
+                            key=lambda item: item[0],
+                        )
+                        logger.info(
+                            "VidXgo: returning captured best variant directly for iOS [%s]",
+                            request_log_context(
+                                request,
+                                manifest_base_url,
+                                route=safe_log_route(selected_proxy),
+                                extractor=extractor,
+                            ),
+                        )
+
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
-                    manifest_content=captured_manifest,
-                    base_url=stream_url,
+                    manifest_content=manifest_content,
+                    base_url=manifest_base_url,
                     proxy_base=proxy_base,
                     stream_headers=stream_headers,
                     original_channel_url=original_channel_url,
@@ -394,14 +435,19 @@ class HLSProxyExtractorHandlerMixin:
                     extractor_key=extractor_key,
                     stream_key=stream_key,
                 )
-                return web.Response(
-                    text=rewritten_manifest,
-                    headers={
-                        "Content-Type": "application/vnd.apple.mpegurl",
-                        "Access-Control-Allow-Origin": "*",
-                        "Cache-Control": "no-cache",
-                    },
-                )
+                response_headers = {
+                    "Content-Type": "application/vnd.apple.mpegurl",
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "no-cache",
+                }
+                if "gzip" in request.headers.get("Accept-Encoding", "").lower():
+                    response_headers["Content-Encoding"] = "gzip"
+                    response_headers["Vary"] = "Accept-Encoding"
+                    return web.Response(
+                        body=gzip.compress(rewritten_manifest.encode("utf-8"), mtime=0),
+                        headers=response_headers,
+                    )
+                return web.Response(text=rewritten_manifest, headers=response_headers)
 
             if redirect_stream and endpoint == "/proxy/mpd/manifest.m3u8":
                 proxy_query = {
@@ -475,7 +521,16 @@ class HLSProxyExtractorHandlerMixin:
                 "query_params": q_params,
             }
 
-            logger.info(f"✅ Extractor OK: {url} -> {stream_url[:50]}...")
+            logger.info(
+                "✅ Extractor OK: %s [%s]",
+                request_log_context(
+                    request,
+                    stream_url,
+                    route=safe_log_route(selected_proxy),
+                    extractor=extractor,
+                ),
+                stream_url[:50],
+            )
             return web.json_response(response_data)
 
         except Exception as e:
@@ -500,13 +555,33 @@ class HLSProxyExtractorHandlerMixin:
             ) or isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)) or type(e).__name__ == "ExtractorError"  # ponytail: expected extractor failures shouldn't print a traceback
 
             error_desc = str(e) or type(e).__name__
+            log_proxy = selected_proxy or (
+                getattr(extractor, "last_used_proxy", None)
+                or getattr(extractor, "selected_proxy", None)
+                or getattr(extractor, "_session_proxy", None)
+                or getattr(extractor, "session_proxy", None)
+            )
+            error_context = request_log_context(
+                request,
+                url,
+                route=safe_log_route(log_proxy),
+                extractor=extractor,
+            )
             if isinstance(e, asyncio.CancelledError):
-                logger.info("Extractor request cancelled (client disconnected)")
+                logger.info("Extractor request cancelled (client disconnected) [%s]", error_context)
                 raise
             if is_expected_error:
-                logger.warning(f"⚠️ Extractor request failed (expected error) [{url}]: {error_desc}")
+                logger.warning(
+                    "⚠️ Extractor request failed (expected error): %s [%s]",
+                    error_desc,
+                    error_context,
+                )
             else:
-                logger.error(f"❌ Error in extractor request [{url}]: {error_desc}")
+                logger.error(
+                    "❌ Error in extractor request: %s [%s]",
+                    error_desc,
+                    error_context,
+                )
                 import traceback
                 traceback.print_exc()
 

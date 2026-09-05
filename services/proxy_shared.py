@@ -64,6 +64,72 @@ from extractors.provider_hooks import *
 from services.manifest_rewriter import ManifestRewriter
 from services.secure_state import open_state, seal_state
 
+
+def safe_log_endpoint(value: str | None) -> str:
+    """Return URL endpoint without query tokens or credentials."""
+    parsed = urlparse(str(value or ""))
+    if not parsed.netloc:
+        return "unknown"
+    path = parsed.path or "/"
+    if len(path) > 160:
+        path = path[:157] + "..."
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def extractor_log_name(request=None, extractor=None, fallback: str = "unknown") -> str:
+    """Resolve a stable, human-readable extractor label for request logs."""
+    if extractor is not None:
+        value = getattr(extractor, "extractor_name", None) or type(extractor).__name__
+        if value:
+            return str(value).replace("_direct", "").replace("_noproxy", "")
+    if request is not None:
+        query = getattr(request, "query", {})
+        value = query.get("extractor_key") or query.get("host")
+        if value:
+            return str(value).replace("_direct", "").replace("_noproxy", "")
+    return fallback
+
+
+def request_log_context(request=None, target_url: str | None = None, route: str | None = None, extractor=None) -> str:
+    """Build consistent extractor/request context for service-level logs."""
+    query = getattr(request, "query", {}) if request is not None else {}
+    path = getattr(request, "path", "") or ""
+    if "segment" in path:
+        request_type = "segment"
+    elif "manifest" in path or path.endswith(".mpd"):
+        request_type = "manifest"
+    else:
+        request_type = "request"
+    if query.get("direct_hls") == "1":
+        extractor_fallback = "direct_hls"
+    elif path.startswith("/proxy/hls/") or path.startswith("/proxy/mpd/"):
+        extractor_fallback = "generic_hls"
+    else:
+        extractor_fallback = "unknown"
+    requested = query.get("orig_url") or query.get("original_channel_url") or query.get("url") or query.get("d")
+    route_text = route or "unknown"
+    return (
+        f"extractor={extractor_log_name(request, extractor, extractor_fallback)} "
+        f"type={request_type} route={route_text} "
+        f"requested={safe_log_endpoint(requested)} target={safe_log_endpoint(target_url)}"
+    )
+
+
+def safe_log_route(proxy_url: str | None) -> str:
+    """Return route identity without proxy credentials."""
+    if not proxy_url:
+        return "DIRECT"
+    if str(proxy_url).upper() in {"WARP", "DIRECT", "BYPASS"}:
+        return str(proxy_url).upper()
+    if _config.is_warp_proxy_url(str(proxy_url)):
+        return "WARP"
+    parsed = urlparse(str(proxy_url))
+    if parsed.hostname:
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"PROXY({parsed.scheme or 'unknown'}://{parsed.hostname}{port})"
+    return "PROXY"
+
+
 # Global registry for domains already bypassed in WARP to avoid redundant os.system calls
 BYPASSED_WARP_DOMAINS = set()
 

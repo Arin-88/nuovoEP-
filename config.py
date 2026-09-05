@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import tracemalloc
 import urllib.request
+import ipaddress
 from dotenv import load_dotenv
 from config_store import (
     DEFAULT_RECORDINGS_DIR,
@@ -35,7 +36,7 @@ ALL_PROXY_ERRORS = (
 )
 
 
-APP_VERSION = "2.11.24"
+APP_VERSION = "2.11.25"
 
 _MEMORY_PROFILE_FRAMES = 15
 _memory_profile_baseline = None
@@ -763,6 +764,7 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
     if not proxy_url:
         return None
 
+    force_ipv4 = bool(kwargs.pop("force_ipv4", False))
     health_check = bool(kwargs.pop("health_check", False))
     is_warp = is_warp_proxy_url(proxy_url)
     if is_warp and not health_check:
@@ -789,7 +791,35 @@ def get_connector_for_proxy(proxy_url: str, **kwargs):
         kwargs.setdefault("keepalive_timeout", 15)
         kwargs.setdefault("force_close", False)
 
-    return ProxyConnector.from_url(connector_url, rdns=rdns, **kwargs)
+    connector_cls = ProxyConnector
+    if force_ipv4:
+        connector_cls = _IPv4ProxyConnector
+        kwargs.setdefault("family", socket.AF_INET)
+
+    return connector_cls.from_url(connector_url, rdns=rdns, **kwargs)
+
+
+class _IPv4ProxyConnector(ProxyConnector):
+    """Proxy connector that resolves upstream hostnames only to IPv4."""
+
+    async def _connect_via_proxy(self, host, port, ssl=None, timeout=None):
+        try:
+            target = ipaddress.ip_address(host)
+            if target.version != 4:
+                raise OSError(f"IPv4-only route cannot use IPv{target.version} target")
+            ipv4_host = host
+        except ValueError:
+            infos = await self._loop.getaddrinfo(
+                host,
+                port,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+            if not infos:
+                raise OSError(f"No IPv4 address found for {host}")
+            ipv4_host = infos[0][4][0]
+
+        return await super()._connect_via_proxy(ipv4_host, port, ssl, timeout)
 
 
 def is_warp_proxy_url(proxy_url: str | None) -> bool:
