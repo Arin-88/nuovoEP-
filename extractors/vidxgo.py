@@ -65,6 +65,7 @@ class VidXgoExtractor:
         self.proxies = proxies or []
         self.selected_proxy = None
         self.session = None
+        self._curl_session = None
         self.mediaflow_endpoint = "hls_proxy"
 
         # Headers used for fetching the embed page.
@@ -127,6 +128,16 @@ class VidXgoExtractor:
 
     # ------------------------------------------------------------------ fetch
 
+    async def _get_curl_session(self):
+        """Reuse the curl_cffi connection pool during one extraction."""
+        if self._curl_session is None:
+            try:
+                from curl_cffi.requests import AsyncSession as CurlAsyncSession
+            except ImportError as exc:
+                raise ExtractorError("VidXgo: curl_cffi is required") from exc
+            self._curl_session = CurlAsyncSession(impersonate="chrome124")
+        return self._curl_session
+
     async def _fetch(self, url: str, headers: dict, bypass_warp: bool = False) -> str:
         """GET `url`; ruota i Referer whitelistati se necessario."""
         paths = self._get_proxies_for_url(url, bypass_warp=bypass_warp)
@@ -137,11 +148,6 @@ class VidXgoExtractor:
             url,
             ", ".join(proxy or "direct" for proxy in paths) or "none",
         )
-        try:
-            from curl_cffi.requests import AsyncSession as CurlAsyncSession
-        except ImportError as exc:
-            raise ExtractorError("VidXgo: curl_cffi is required") from exc
-
         curl_headers = {
             key: value for key, value in headers.items()
             if key.lower() != "user-agent"
@@ -154,17 +160,15 @@ class VidXgoExtractor:
             } if proxy_url else {}
             try:
                 logger.info("vidxgo curl fetch via %s for %s", proxy_url or "direct", url)
-                async with CurlAsyncSession(
-                    impersonate="chrome124",
-                ) as session:
-                    resp = await session.get(
-                        url,
-                        headers=curl_headers,
-                        timeout=25,
-                        verify=False,
-                        allow_redirects=True,
-                        **request_kwargs,
-                    )
+                session = await self._get_curl_session()
+                resp = await session.get(
+                    url,
+                    headers=curl_headers,
+                    timeout=25,
+                    verify=False,
+                    allow_redirects=True,
+                    **request_kwargs,
+                )
                 if not 200 <= resp.status_code < 300:
                     raise ExtractorError(
                         f"curl_cffi HTTP {resp.status_code} via {proxy_url or 'direct'}"
@@ -255,7 +259,9 @@ class VidXgoExtractor:
         m3u8_url = self._decode_embed(html)
         logger.info(f"vidxgo: extracted m3u8 for {url} -> {m3u8_url[:80]}...")
 
-        # 3. Fetch master + each referenced variant playlist.
+        # 3. Fetch master and only the selected video variant. The proxy
+        # rewriter exposes the highest-bandwidth variant, so fetching every
+        # variant here only adds latency and the result is otherwise unused.
         master_text = await self._fetch(m3u8_url, playback_headers, bypass_warp=bypass_warp)
         if "#EXTM3U" not in master_text:
             raise ExtractorError("VidXgo: extracted URL did not return a valid HLS manifest")
@@ -264,11 +270,17 @@ class VidXgoExtractor:
         captured_map: dict[str, str] = {}
         master_lines = master_text.splitlines()
         variant_urls: list[str] = []
+        video_variants: list[tuple[str, int]] = []
         for i, line in enumerate(master_lines):
             if line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(master_lines):
                 raw = master_lines[i + 1].strip()
                 if raw and not raw.startswith("#"):
-                    variant_urls.append(urljoin(m3u8_url, raw))
+                    variant_url = urljoin(m3u8_url, raw)
+                    variant_urls.append(variant_url)
+                    bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
+                    video_variants.append(
+                        (variant_url, int(bandwidth_match.group(1)) if bandwidth_match else 0)
+                    )
 
         for line in master_lines:
             if line.startswith("#EXT-X-MEDIA:") and 'URI="' in line:
@@ -279,12 +291,29 @@ class VidXgoExtractor:
                     if media_url not in variant_urls:
                         variant_urls.append(media_url)
 
-        for v_url in variant_urls:
+        if video_variants:
+            selected_variant, _bandwidth = max(
+                video_variants,
+                key=lambda candidate: candidate[1],
+            )
+            logger.info(
+                "vidxgo: prefetching selected variant only (%d/%d): %s",
+                variant_urls.index(selected_variant) + 1,
+                len(variant_urls),
+                selected_variant,
+            )
             try:
-                v_text = await self._fetch(v_url, playback_headers, bypass_warp=bypass_warp)
-                captured_map[v_url] = v_text
+                captured_map[selected_variant] = await self._fetch(
+                    selected_variant,
+                    playback_headers,
+                    bypass_warp=bypass_warp,
+                )
             except Exception as e:
-                logger.warning(f"vidxgo: variant fetch failed {v_url[:80]}...: {e}")
+                logger.warning(
+                    "vidxgo: selected variant fetch failed %s: %s",
+                    selected_variant,
+                    e,
+                )
 
         captured_map[m3u8_url] = master_text
 
@@ -300,5 +329,11 @@ class VidXgoExtractor:
         return result
 
     async def close(self):
+        if self._curl_session is not None:
+            try:
+                await self._curl_session.close()
+            except Exception:
+                pass
+            self._curl_session = None
         if self.session and not self.session.closed:
             await self.session.close()
