@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import time
 import urllib.parse
 import aiohttp
@@ -28,6 +29,9 @@ from services.proxy_shared import (
     get_public_base_url,
     get_extractor_routing_overrides,
 )
+
+HLS_MEDIA_PLAYLIST_CACHE_TTL = 2.0
+HLS_MEDIA_PLAYLIST_CACHE_MAX = 64
 
 
 class HLSProxyManifestHandlerMixin:
@@ -419,6 +423,40 @@ class HLSProxyManifestHandlerMixin:
             # (e.g. "dashinripe" in URL being mistaken for a DASH manifest).
             is_mpd = ".mpd" in stream_url.lower() or "/dash/" in stream_url.lower()
             if is_mpd:
+                requested_rep_id = request.query.get("rep_id")
+                playlist_cache_key = None
+                if requested_rep_id:
+                    # Hash the complete request URL so credentials/tokens are
+                    # not retained as cache keys in memory or diagnostics.
+                    playlist_cache_key = hashlib.sha256(
+                        str(request.rel_url).encode("utf-8")
+                    ).hexdigest()
+                    playlist_cache = getattr(self, "_hls_playlist_cache", None)
+                    if playlist_cache is None:
+                        playlist_cache = {}
+                        self._hls_playlist_cache = playlist_cache
+
+                    now = time.monotonic()
+                    for cache_key, cache_entry in list(playlist_cache.items()):
+                        if cache_entry[0] <= now:
+                            playlist_cache.pop(cache_key, None)
+
+                    cached_playlist = playlist_cache.get(playlist_cache_key)
+                    if cached_playlist:
+                        logger.debug(
+                            "[HLS cache] hit: rep_id=%s age=%.2fs",
+                            requested_rep_id,
+                            now - cached_playlist[1],
+                        )
+                        return web.Response(
+                            text=cached_playlist[2],
+                            content_type="application/vnd.apple.mpegurl",
+                            headers={
+                                "Access-Control-Allow-Origin": "*",
+                                "Cache-Control": "no-cache",
+                            },
+                        )
+
                 # Convert MPD to HLS with server-side decryption
                 logger.info(
                     f"🔄 [Legacy Mode] Converting MPD to HLS: {stream_url}"
@@ -572,6 +610,30 @@ class HLSProxyManifestHandlerMixin:
                     # Use final_mpd_url (after redirects) for segment URL construction
                     hls_content = converter.convert_master_playlist(
                         manifest_content, proxy_base, final_mpd_url, params
+                    )
+
+                if playlist_cache_key:
+                    self._register_segment_prefetch_chain(hls_content)
+                    playlist_cache = getattr(self, "_hls_playlist_cache", None)
+                    if playlist_cache is None:
+                        playlist_cache = {}
+                        self._hls_playlist_cache = playlist_cache
+                    now = time.monotonic()
+                    playlist_cache[playlist_cache_key] = (
+                        now + HLS_MEDIA_PLAYLIST_CACHE_TTL,
+                        now,
+                        hls_content,
+                    )
+                    for cache_key, cache_entry in list(playlist_cache.items()):
+                        if cache_entry[0] <= now:
+                            playlist_cache.pop(cache_key, None)
+                    while len(playlist_cache) > HLS_MEDIA_PLAYLIST_CACHE_MAX:
+                        playlist_cache.pop(next(iter(playlist_cache)), None)
+                    logger.debug(
+                        "[HLS cache] stored: rep_id=%s ttl=%.1fs entries=%d",
+                        rep_id,
+                        HLS_MEDIA_PLAYLIST_CACHE_TTL,
+                        len(playlist_cache),
                     )
 
                 return web.Response(

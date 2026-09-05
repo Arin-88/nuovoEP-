@@ -895,6 +895,20 @@ class HLSProxyCoreMixin:
 
     async def cleanup(self):
         """Pulizia delle risorse"""
+        prefetch_tasks = list(getattr(self, "prefetch_tasks", set()))
+        for task in prefetch_tasks:
+            task.cancel()
+        if prefetch_tasks:
+            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
+        self.prefetch_tasks.clear()
+        for entry in getattr(self, "_segment_prefetch_cache", {}).values():
+            timer = entry.get("timer")
+            if timer:
+                timer.cancel()
+        getattr(self, "_segment_prefetch_cache", {}).clear()
+        getattr(self, "_segment_next_urls", {}).clear()
+        getattr(self, "_hls_playlist_cache", {}).clear()
+
         tasks = list(self._background_tasks)
         for task in tasks:
             task.cancel()
