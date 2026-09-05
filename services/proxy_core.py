@@ -719,10 +719,11 @@ class HLSProxyCoreMixin:
                         "family": socket.AF_INET,
                     }
                     if _shared.WARP_PROXY_URL and proxy == _shared.WARP_PROXY_URL:
-                        # Do not retain idle CDN sockets inside WireProxy after
-                        # a playlist/segment response completes. limit=0 stays:
-                        # this changes lifetime only, not concurrency.
-                        connector_kwargs["force_close"] = True
+                        # Reuse short-lived upstream connections during HLS
+                        # playback. Network failures invalidate this pooled
+                        # session and trigger a fresh WARP connection.
+                        connector_kwargs["keepalive_timeout"] = 15
+                        connector_kwargs["enable_cleanup_closed"] = True
                     else:
                         connector_kwargs["keepalive_timeout"] = 15
                     connector = get_connector_for_proxy(proxy, **connector_kwargs)
