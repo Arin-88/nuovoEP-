@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import time
 
 import aiohttp
@@ -95,6 +96,10 @@ def _tor_identity() -> tuple[int | None, int | None]:
 
 def _repair_tor_data_permissions(tor_uid: int, tor_gid: int) -> None:
     """Make the bind-mounted Tor state readable/writable by debian-tor."""
+    parent_dir = os.path.dirname(os.path.abspath(TOR_DATA_DIR))
+    parent_mode = stat.S_IMODE(os.stat(parent_dir).st_mode)
+    # Tor only needs to traverse the /data mount; keep its contents private.
+    os.chmod(parent_dir, parent_mode | stat.S_IXOTH)
     os.makedirs(TOR_DATA_DIR, exist_ok=True)
     os.chown(TOR_DATA_DIR, tor_uid, tor_gid)
     os.chmod(TOR_DATA_DIR, 0o700)
