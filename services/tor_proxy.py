@@ -109,7 +109,12 @@ def _write_torrc() -> None:
                 tor_uid = pwd.getpwnam("debian-tor").pw_uid
                 tor_gid = grp.getgrnam("debian-tor").gr_gid
                 os.chown(TOR_DATA_DIR, tor_uid, tor_gid)
-            except (OSError, KeyError):
+                os.chmod(TOR_DATA_DIR, 0o700)
+            except OSError as exc:
+                raise TorError(
+                    f"Cannot prepare Tor data directory {TOR_DATA_DIR}: {exc}"
+                ) from exc
+            except KeyError:
                 pass
             lines.append("User debian-tor")
     with open(TORRC_PATH, "w", encoding="utf-8") as handle:
@@ -122,11 +127,20 @@ def _write_torrc() -> None:
         # A bind-mounted /data/tor can contain files created by a previous
         # root process. Tor must be able to update its state, cookie and log.
         for root, dirs, files in os.walk(TOR_DATA_DIR):
-            for name in (*dirs, *files):
+            for name in dirs:
                 try:
-                    os.chown(os.path.join(root, name), tor_uid, tor_gid)
-                except OSError:
-                    pass
+                    path = os.path.join(root, name)
+                    os.chown(path, tor_uid, tor_gid)
+                    os.chmod(path, 0o700)
+                except OSError as exc:
+                    raise TorError(f"Cannot repair Tor directory permissions: {exc}") from exc
+            for name in files:
+                try:
+                    path = os.path.join(root, name)
+                    os.chown(path, tor_uid, tor_gid)
+                    os.chmod(path, 0o600)
+                except OSError as exc:
+                    raise TorError(f"Cannot repair Tor file permissions: {exc}") from exc
 
 
 async def _port_ready(host: str, port: int) -> bool:
