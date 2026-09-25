@@ -60,6 +60,21 @@ def set_bind(value: str) -> str:
     return bind
 
 
+_EXIT_NODES_RE = re.compile(r"^[A-Za-z0-9${},~=_.\-]+$")
+
+
+def get_exit_nodes() -> str:
+    return str(config_store.get("tor_exit_nodes", "") or "").strip()
+
+
+def set_exit_nodes(value: str) -> str:
+    nodes = (value or "").strip()
+    if nodes and (len(nodes) > 200 or not _EXIT_NODES_RE.match(nodes)):
+        raise TorError(f"Invalid exit nodes: {value!r}")
+    config_store.set("tor_exit_nodes", nodes)
+    return nodes
+
+
 def is_enabled() -> bool:
     return bool(config_store.get("tor_enabled", False))
 
@@ -135,6 +150,13 @@ def _write_torrc() -> None:
         "ClientOnly 1",
         "AvoidDiskWrites 0",
         f"MaxCircuitDirtiness {TOR_MAX_CIRCUIT_DIRTINESS}",
+    ]
+    exit_nodes = get_exit_nodes()
+    if exit_nodes:
+        # Pin the exit so the egress IP never changes between circuits.
+        lines.append(f"ExitNodes {exit_nodes}")
+        lines.append("StrictNodes 1")
+    lines += [
         f"ControlPort {TOR_CONTROL_HOST}:{TOR_CONTROL_PORT}",
         "CookieAuthentication 1",
         f"CookieAuthFile {os.path.join(TOR_DATA_DIR, 'control_auth_cookie')}",
@@ -173,6 +195,50 @@ async def _control_command(reader, writer, command: str) -> None:
         if line.startswith("4") or line.startswith("5"):
             raise TorError(line)
     raise TorError("Unexpected Tor control response")
+
+
+async def _control_lines(command: str) -> list[str]:
+    """Run a read-only control command and return its (unprefixed) response lines."""
+    cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
+    try:
+        with open(cookie_path, "rb") as handle:
+            cookie = handle.read()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(TOR_CONTROL_HOST, TOR_CONTROL_PORT), timeout=5
+        )
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise TorError("Tor control port is unavailable") from exc
+    try:
+        await _control_command(reader, writer, f"AUTHENTICATE {cookie.hex()}")
+        writer.write((command + "\r\n").encode("ascii"))
+        await writer.drain()
+        lines = []
+        in_data = False
+        for _ in range(4096):
+            line = (await asyncio.wait_for(reader.readline(), timeout=10)).decode("utf-8", "replace").rstrip("\r\n")
+            if in_data:
+                if line == ".":
+                    in_data = False
+                else:
+                    lines.append(line)
+                continue
+            if line == "250 OK":
+                return lines
+            if line.startswith("250+"):
+                in_data = True
+            elif line.startswith("250-"):
+                lines.append(line[4:])
+            elif line.startswith("250 "):
+                lines.append(line[4:])
+            elif line.startswith("4") or line.startswith("5"):
+                raise TorError(line)
+        raise TorError("Unexpected Tor control response")
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
 
 
 async def _bootstrap_progress() -> int | None:
@@ -368,6 +434,33 @@ async def check() -> dict:
     return result
 
 
+_NS_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+async def current_exit_fingerprint() -> str:
+    """Resolve the relay fingerprint currently used as exit, to pin it."""
+    result = await check()
+    egress_ip = result.get("egress_ip", "")
+    if not egress_ip:
+        raise TorError(result.get("error") or "Tor is not reachable")
+    fingerprints = []
+    for line in await _control_lines("GETINFO circuit-status"):
+        if " BUILT " not in line:
+            continue
+        path = next((part for part in line.split() if part.startswith("$")), "")
+        if path:
+            fingerprints.append(path.split(",")[-1].split("~")[0].lstrip("$"))
+    for fingerprint in dict.fromkeys(fingerprints):
+        try:
+            ns_lines = await _control_lines(f"GETINFO ns/id/{fingerprint}")
+        except TorError:
+            continue
+        for ns_line in ns_lines:
+            if ns_line.startswith("r ") and egress_ip in _NS_IP_RE.findall(ns_line):
+                return fingerprint
+    raise TorError(f"Could not map exit IP {egress_ip} to a relay fingerprint")
+
+
 async def logs(lines: int = 120) -> str:
     return _log_tail(lines)
 
@@ -380,6 +473,7 @@ async def status(with_probe: bool = False) -> dict:
         "enabled": is_enabled(),
         "available": available(),
         "automatic_rotation": False,
+        "exit_nodes": get_exit_nodes(),
         "probe_ip": "",
     }
     if with_probe and data["running"]:
@@ -409,5 +503,6 @@ async def keepalive_loop(interval: float = 30.0) -> None:
 
 __all__ = [
     "TorError", "available", "get_bind", "set_bind", "is_enabled", "set_enabled",
+    "get_exit_nodes", "set_exit_nodes", "current_exit_fingerprint",
     "start", "stop", "restart", "new_identity", "check", "logs", "status", "keepalive_loop",
 ]

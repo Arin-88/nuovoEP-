@@ -47,6 +47,8 @@ DEFAULT_CONFIG = {
     "wg_custom_enabled": False,
     "tor_bind": "127.0.0.1:9050",
     "tor_enabled": False,
+    # Optional pinned Tor exit ($fingerprint or {country}); keeps the egress IP fixed.
+    "tor_exit_nodes": "",
     "extractor_proxies": {},
     # Cinejoy's gateway rejects Cloudflare WARP egress (HTTP 403). Keep its
     # resolver direct unless the user explicitly supplies another proxy route.

@@ -1649,17 +1649,34 @@ class HLSProxyPagesMixin:
             "%{time_total}",
             extra=["--output", devnull],
         )) * 1000
-        download = self._run_proxy_curl(
-            proxy_url,
+        # A Tor exit can refuse specific hosts (proof.ovh.net is a common one),
+        # so fall back across mirrors until one leg returns real bytes.
+        download, last_error = None, None
+        for endpoint in (
             "https://proof.ovh.net/files/10Gb.dat",
-            "%{size_download}\\t%{speed_download}\\t%{time_total}",
-            extra=["--output", devnull],
-            timeout=20,
-            allow_timeout=True,
-        )
-        download_bytes, download_speed, download_time = download.split("\t")
-        # Some exits/hosts stall the upload leg (httpbin.org often does on Tor),
-        # so fall back across two purpose-built upload sinks.
+            "https://speed.cloudflare.com/__down?bytes=100000000",
+            "https://ash-speed.hetzner.com/100MB.bin",
+        ):
+            try:
+                metrics = self._run_proxy_curl(
+                    proxy_url,
+                    endpoint,
+                    "%{size_download}\\t%{speed_download}\\t%{time_total}",
+                    extra=["--output", devnull],
+                    timeout=20,
+                    allow_timeout=True,
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            download_bytes, download_speed, download_time = metrics.split("\t")
+            if float(download_bytes) > 0:
+                download = (download_bytes, download_speed, download_time)
+                break
+        if download is None:
+            raise last_error or RuntimeError(f"Proxy test returned no payload: {proxy_url}")
+        download_bytes, download_speed, download_time = download
+
         upload, last_error = None, None
         for endpoint in (
             "https://speed.cloudflare.com/__up",
@@ -1674,7 +1691,7 @@ class HLSProxyPagesMixin:
             if float(upload_bytes) > 0:
                 upload = (upload_bytes, upload_speed, upload_time)
                 break
-        if float(download_bytes) <= 0 or upload is None:
+        if upload is None:
             raise last_error or RuntimeError(f"Proxy test returned no payload: {proxy_url}")
         upload_bytes, upload_speed, upload_time = upload
 
