@@ -175,6 +175,37 @@ async def _control_command(reader, writer, command: str) -> None:
     raise TorError("Unexpected Tor control response")
 
 
+async def _bootstrap_progress() -> int | None:
+    """Return Tor's bootstrap percentage, or None while the control port is not ready."""
+    cookie_path = os.path.join(TOR_DATA_DIR, "control_auth_cookie")
+    try:
+        with open(cookie_path, "rb") as handle:
+            cookie = handle.read()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(TOR_CONTROL_HOST, TOR_CONTROL_PORT), timeout=5
+        )
+    except (OSError, asyncio.TimeoutError):
+        return None
+    try:
+        await _control_command(reader, writer, f"AUTHENTICATE {cookie.hex()}")
+        writer.write(b"GETINFO status/bootstrap-phase\r\n")
+        await writer.drain()
+        for _ in range(64):
+            line = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("utf-8", "replace")
+            match = re.search(r"PROGRESS=(\d+)", line)
+            if match:
+                return int(match.group(1))
+        return None
+    except (OSError, asyncio.TimeoutError, TorError):
+        return None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+
 def _log_tail(lines: int = 24) -> str:
     try:
         with open(TOR_LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
@@ -286,12 +317,12 @@ async def start() -> None:
                     raise TorError(
                         f"Tor exited during startup (code {process.returncode}): {detail or 'no Tor output'}"
                     )
-                if await _port_ready(host, port):
-                    logger.info("Tor SOCKS5 ready on %s:%s", host, port)
+                if await _port_ready(host, port) and await _bootstrap_progress() == 100:
+                    logger.info("Tor SOCKS5 ready and bootstrapped on %s:%s", host, port)
                     ready = True
                     return
                 await asyncio.sleep(1)
-            raise TorError(f"Tor did not open its SOCKS5 port in time: {_log_tail()}")
+            raise TorError(f"Tor did not bootstrap in time: {_log_tail()}")
         finally:
             if not ready:
                 if _process is process:

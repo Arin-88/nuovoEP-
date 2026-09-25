@@ -1626,6 +1626,15 @@ class HLSProxyPagesMixin:
         return stdout.decode(errors="replace").strip()
 
     def _run_proxy_speedtest(self, proxy_url):
+        for attempt in range(2):
+            try:
+                return self._measure_proxy_speedtest(proxy_url)
+            except RuntimeError as exc:
+                # A stalled circuit (common on Tor) can drop one leg of the test.
+                if "no payload" not in str(exc) or attempt:
+                    raise
+
+    def _measure_proxy_speedtest(self, proxy_url):
         """Measure real proxied TCP throughput; Ookla's static binary ignores proxies."""
         devnull = os.devnull
         ip = self._run_proxy_curl(
@@ -1648,16 +1657,31 @@ class HLSProxyPagesMixin:
             timeout=20,
             allow_timeout=True,
         )
-        upload = self._run_proxy_stream_upload(proxy_url, "https://httpbin.org/post", duration=10)
         download_bytes, download_speed, download_time = download.split("\t")
-        upload_bytes, upload_speed, upload_time = upload.split("\t")
-        if float(download_bytes) <= 0 or float(upload_bytes) <= 0:
-            raise RuntimeError(f"Proxy test returned no payload: {proxy_url}")
+        # Some exits/hosts stall the upload leg (httpbin.org often does on Tor),
+        # so fall back across two purpose-built upload sinks.
+        upload, last_error = None, None
+        for endpoint in (
+            "https://speed.cloudflare.com/__up",
+            "https://librespeed.org/backend/empty.php",
+        ):
+            try:
+                metrics = self._run_proxy_stream_upload(proxy_url, endpoint, duration=10)
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+            upload_bytes, upload_speed, upload_time = metrics.split("\t")
+            if float(upload_bytes) > 0:
+                upload = (upload_bytes, upload_speed, upload_time)
+                break
+        if float(download_bytes) <= 0 or upload is None:
+            raise last_error or RuntimeError(f"Proxy test returned no payload: {proxy_url}")
+        upload_bytes, upload_speed, upload_time = upload
 
         return {
             "server": {
                 "sponsor": "Proxy throughput",
-                "name": "proof.ovh.net + httpbin.org",
+                "name": "proof.ovh.net + speed.cloudflare.com",
                 "location": "via proxy",
             },
             "proxy_used": proxy_url,
