@@ -334,47 +334,27 @@ async def _verify_config() -> None:
 
 
 async def new_identity() -> None:
-    """Ask Tor for a new circuit; when an exit is pinned, rotate the pin to a new relay.
+    """Switch to a fresh exit; the new relay is then pinned automatically.
 
-    Restarting Tor drops every circuit. A live SIGNAL NEWNYM would not: old
-    circuits (MaxCircuitDirtiness is 30 days) keep serving new streams, so the
-    old IP can come back. Two restarts: one to get a random new exit, one to
-    make every circuit use the newly pinned relay.
+    A restart is required: SIGNAL NEWNYM alone leaves the old circuits alive
+    (MaxCircuitDirtiness is 30 days) and they keep serving new streams, so the
+    previous IP can come back.
     """
     if _pid() is None:
         raise TorError("Tor is not running")
-    pinned = get_exit_nodes()
-    if not pinned:
-        await _control_lines("SIGNAL NEWNYM")
-        return
-    previous_ip = (await check()).get("egress_ip", "")
-    set_exit_nodes("")
-    fingerprint = ""
-    try:
-        for _ in range(3):
-            await restart()
-            new_ip = (await check()).get("egress_ip", "")
-            if not new_ip or new_ip == previous_ip:
-                continue
-            try:
-                fingerprint = await _fingerprint_for_ip(new_ip)
-            except TorError:
-                continue
-            break
-        if not fingerprint:
-            raise TorError("Tor did not pick a new exit; try again")
-        set_exit_nodes(fingerprint)
-        await restart()
-    except TorError:
-        set_exit_nodes(pinned)
-        try:
-            await restart()
-        except TorError:
-            pass
-        raise
+    if get_exit_nodes():
+        set_exit_nodes("")
+    await restart()
 
 
-async def start() -> None:
+async def _pin_current_exit() -> None:
+    """Pin the exit Tor is currently using, then rebuild every circuit on it."""
+    fingerprint = await current_exit_fingerprint()
+    set_exit_nodes(fingerprint)
+    await restart()
+
+
+async def _start() -> None:
     global _process
     async with _lock:
         if _process is not None:
@@ -416,6 +396,16 @@ async def start() -> None:
                 await _terminate(process)
             elif _process is process and process.returncode is not None:
                 _process = None
+
+
+async def start() -> None:
+    """Start Tor and pin its exit automatically when no pin exists yet."""
+    await _start()
+    if not get_exit_nodes():
+        try:
+            await _pin_current_exit()
+        except TorError as exc:
+            logger.warning("Could not auto-pin a Tor exit: %s", exc)
 
 
 async def stop() -> None:
@@ -512,6 +502,12 @@ async def ensure_running() -> None:
             await start()
         except TorError as exc:
             logger.warning("Tor could not be started: %s", exc)
+            return
+    if _pid() is not None and not get_exit_nodes():
+        try:
+            await _pin_current_exit()
+        except TorError as exc:
+            logger.warning("Could not pin a Tor exit: %s", exc)
 
 
 async def keepalive_loop(interval: float = 30.0) -> None:

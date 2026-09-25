@@ -81,31 +81,6 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
         except tor_proxy.TorError as exc:
             return _json({"error": str(exc)}, status=400)
 
-    async def lock_exit(request):
-        if not await guard(request):
-            return _unauthorized()
-        try:
-            fingerprint = await tor_proxy.current_exit_fingerprint()
-            tor_proxy.set_exit_nodes(fingerprint)
-            await tor_proxy.restart()
-            return _json({
-                "status": "locked",
-                "fingerprint": fingerprint,
-                "tor": await tor_proxy.status(with_probe=True),
-            })
-        except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
-
-    async def unlock_exit(request):
-        if not await guard(request):
-            return _unauthorized()
-        try:
-            tor_proxy.set_exit_nodes("")
-            await tor_proxy.restart()
-            return _json({"status": "unlocked", "tor": await tor_proxy.status(with_probe=True)})
-        except tor_proxy.TorError as exc:
-            return _json({"error": str(exc)}, status=400)
-
     async def logs(request):
         if not await guard(request):
             return _unauthorized()
@@ -119,8 +94,6 @@ def setup_tor_proxy_routes(app: web.Application) -> None:
     app.router.add_post("/api/admin/tor/bind", bind)
     app.router.add_post("/api/admin/tor/check", check)
     app.router.add_post("/api/admin/tor/new-identity", new_identity)
-    app.router.add_post("/api/admin/tor/lock-exit", lock_exit)
-    app.router.add_post("/api/admin/tor/unlock-exit", unlock_exit)
     app.router.add_get("/api/admin/tor/logs", logs)
 
 
