@@ -26,7 +26,7 @@
         <div class="row"><label>Pinned exit</label><span class="value mono" id="exit-pin">-</span><button class="btn btn-sm" onclick="lockExit()">Lock current IP</button><button class="btn btn-sm" onclick="unlockExit()">Unlock</button></div>
         <div class="row"><label>Process</label><span class="value mono" id="pid">-</span></div>
         <div class="row"><button class="btn btn-primary btn-sm" onclick="startTor()">Start</button><button class="btn btn-primary btn-sm" onclick="newIdentity()">Request new IP</button><button class="btn btn-primary btn-sm" onclick="restartTor()">Restart</button><button class="btn btn-danger btn-sm" onclick="stopTor()">Stop</button><button class="btn btn-sm" onclick="toggleLogs()">Show logs</button></div>
-        <p class="hint">Automatic rotation disabled. <span class="mono">Lock current IP</span> pins the current exit relay so every circuit keeps the same egress IP; if that relay goes offline Tor cannot connect until you unlock. Without a pin, a stream failure can still move you to a different circuit/exit.</p>
+        <p class="hint">Automatic rotation disabled. <span class="mono">Lock current IP</span> pins the current exit relay so every circuit keeps the same egress IP; if that relay goes offline Tor cannot connect until you unlock. When pinned, <span class="mono">Request new IP</span> moves to a different relay and pins that one. Without a pin, a stream failure can still move you to a different circuit/exit.</p>
         <pre class="logs" id="logs" style="display:none"></pre>
     </div>
     <div class="card">
